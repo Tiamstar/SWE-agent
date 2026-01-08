@@ -7,6 +7,9 @@ import sys
 import os
 import io
 
+# Add registry lib to Python path for container environment
+sys.path.insert(0, "/root/tools/registry/lib")
+
 from registry import registry
 
 

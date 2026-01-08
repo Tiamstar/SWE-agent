@@ -294,19 +294,39 @@ class ToolHandler:
         env.set_env_variables(self.config.env_variables)
         cwd = env.communicate("pwd", check="raise").strip()
         asyncio.run(self._upload_bundles(env))
+
+        # Collect Python lib paths from all bundles
+        python_lib_paths = []
+
         for bundle in self.config.bundles:
             cmds = [
                 f"export PATH=/root/tools/{bundle.path.name}/bin:$PATH",
-                f"chmod +x /root/tools/{bundle.path.name}/bin/*",
+                # Use find to make chmod work even with empty directories
+                f"find /root/tools/{bundle.path.name}/bin -type f -exec chmod +x {{}} + 2>/dev/null || true",
             ]
             if (bundle.path / "install.sh").exists():
-                cmds.append(f"cd /root/tools/{bundle.path.name} && source install.sh")
-            cmds.append(f"chmod +x /root/tools/{bundle.path.name}/bin/*")
+                # Don't use && for install.sh - let it run independently
+                cmds.append(f"(cd /root/tools/{bundle.path.name} && source install.sh) || true")
+            # Make sure bin files are executable after installation
+            cmds.append(f"find /root/tools/{bundle.path.name}/bin -type f -exec chmod +x {{}} + 2>/dev/null || true")
             env.communicate(
                 " && ".join(cmds),
                 check="raise",
                 timeout=self.config.install_timeout,
             )
+
+            # Check if bundle has a lib directory and add it to PYTHONPATH
+            if (bundle.path / "lib").exists():
+                python_lib_paths.append(f"/root/tools/{bundle.path.name}/lib")
+
+        # Set PYTHONPATH with all lib directories
+        if python_lib_paths:
+            pythonpath = ":".join(python_lib_paths)
+            # Add to PATH and PYTHONPATH, making them persistent
+            self._reset_commands.append(f'export PYTHONPATH="{pythonpath}:$PYTHONPATH"')
+            env.communicate(f'export PYTHONPATH="{pythonpath}:$PYTHONPATH"', check="raise")
+            self.logger.info(f"Set PYTHONPATH to: {pythonpath}")
+
         env.communicate(f"cd {cwd}", check="raise")
         path = env.communicate("echo $PATH", check="raise").strip()
         asyncio.run(self._check_available_commands(env, {"PATH": path}))
@@ -372,6 +392,12 @@ class ToolHandler:
     def check_for_submission_cmd(self, output: str) -> bool:
         """Function for checking submission request."""
         if r"<<SWE_AGENT_SUBMISSION>>" in output:
+            return True
+        return False
+
+    def check_for_mas_result(self, output: str) -> bool:
+        """Function for checking MAS agent result (multi-agent systems)."""
+        if r"<<MAS_AGENT_RESULT>>" in output:
             return True
         return False
 

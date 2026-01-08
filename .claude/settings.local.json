@@ -1,0 +1,27 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m pytest:*)",
+      "Bash(python tools/multi_agent_demo.py:*)",
+      "Bash(python:*)",
+      "Bash(ruff check:*)",
+      "Bash(timeout 60 python:*)",
+      "Bash(timeout 120 python tools/run_mas.py:*)",
+      "Bash(mkdir:*)",
+      "Bash(chmod +x:*)",
+      "Bash(python3:*)",
+      "Bash(/workspaces/SWE-agent/tools/harmony_graph/bin/inspect_file_topology:*)",
+      "Bash(/workspaces/SWE-agent/tools/harmony_graph/bin/verify_func_signature:*)",
+      "Bash(export NEO4J_URI=\"bolt://fake-host:7687\")",
+      "Bash(export NEO4J_USER=\"test\")",
+      "Bash(export NEO4J_PASSWORD=\"test\")",
+      "Bash(timeout 5 /workspaces/SWE-agent/tools/harmony_graph/bin/inspect_file_topology:*)",
+      "Bash(echo:*)",
+      "Bash(getent group:*)",
+      "Bash(cat:*)",
+      "Bash(find:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

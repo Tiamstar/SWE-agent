@@ -1,0 +1,14 @@
+tools: {}
+# Static Analysis Tools Bundle
+# This bundle installs C/C++ static analysis tools via install.sh
+#
+# Tools provided:
+#   - cppcheck: Static analysis for C/C++ code
+#   - clang-tidy: Clang-based linter
+#   - cpplint: Google C++ style checker
+#
+# These tools are invoked directly via bash commands, not as wrapper tools.
+# The Review Agent uses them by running:
+#   - cppcheck --enable=all <file>
+#   - clang-tidy <file> -- -std=c++17
+#   - cpplint <file>

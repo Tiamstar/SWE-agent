@@ -6,20 +6,34 @@ This script demonstrates the Hub-and-Spoke architecture where:
 - Context flows through the Coordinator (no peer-to-peer communication)
 
 Usage:
+    # Create new container
     python tools/run_mas.py --repo <github_url> --issue <issue_url>
     python tools/run_mas.py --repo /path/to/local/repo --issue_text "Bug description"
+    
+    # Use existing container
+    python tools/run_mas.py --use_existing_container <container_name> \\
+        --container_repo_path /workspace --issue_text "Bug description" \\
+        --neo4j_uri neo4j+s://your.database.io --neo4j_user neo4j --neo4j_password <password>
+    
+    # With Neo4j configuration
+    python tools/run_mas.py --repo <repo> --issue <issue> \\
+        --neo4j_uri neo4j+s://your.database.io \\
+        --neo4j_user neo4j \\
+        --neo4j_password <password>
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
 from sweagent.agent.mas.coordinator import RepairCoordinator, load_agent_config_from_yaml
-from sweagent.environment.repo import GithubRepoConfig, LocalRepoConfig
+from sweagent.environment.repo import GithubRepoConfig, LocalRepoConfig, PreExistingRepoConfig
 from sweagent.environment.swe_env import EnvironmentConfig, SWEEnv
 from sweagent.utils.log import get_logger
+from swerex.deployment.config import DockerDeploymentConfig
 
 logger = get_logger("run-mas", emoji="🚀")
 
@@ -81,6 +95,40 @@ def parse_args():
         help="Docker image to use (default: python:3.11)",
     )
 
+    # Existing container options
+    parser.add_argument(
+        "--use_existing_container",
+        default=None,
+        help="Use an existing Docker container instead of creating a new one (container name or ID)",
+    )
+    parser.add_argument(
+        "--container_repo_path",
+        default="workspace",
+        help="Path to repository in the existing container (default: workspace)",
+    )
+    parser.add_argument(
+        "--container_python_dir",
+        default="/root",
+        help="Python standalone directory in container (default: /root)",
+    )
+
+    # Neo4j configuration options
+    parser.add_argument(
+        "--neo4j_uri",
+        default=None,
+        help="Neo4j database URI (default: from environment or all_local.py config)",
+    )
+    parser.add_argument(
+        "--neo4j_user",
+        default=None,
+        help="Neo4j username (default: from environment or all_local.py config)",
+    )
+    parser.add_argument(
+        "--neo4j_password",
+        default=None,
+        help="Neo4j password (default: from environment or all_local.py config)",
+    )
+
     parser.add_argument(
         "--request_id",
         default="default",
@@ -114,7 +162,6 @@ def get_issue_description(args) -> str:
 def main():
     """Main entry point for MARRS."""
     # Fix Docker permissions if needed (in dev container, permissions can be reset)
-    import os
     import subprocess
 
     docker_socket = "/var/run/docker.sock"
@@ -143,12 +190,51 @@ def main():
     logger.info("\nSetting up environment configuration...")
 
     # Determine repo config based on input
-    if args.repo.startswith("http"):
-        repo_config = GithubRepoConfig(github_url=args.repo)
+    if args.use_existing_container:
+        # Using existing container - repo should already exist there
+        logger.info(f"Using existing container: {args.use_existing_container}")
+        repo_config = PreExistingRepoConfig(
+            repo_name=args.container_repo_path,
+            base_commit="HEAD",
+            reset=True,
+        )
+        # For existing containers, we use PreExistingRepoConfig without creating a new deployment
+        env_config = EnvironmentConfig(repo=repo_config)
     else:
-        repo_config = LocalRepoConfig(path=Path(args.repo))
+        # Create new container from image
+        if args.repo.startswith("http"):
+            repo_config = GithubRepoConfig(github_url=args.repo)
+        else:
+            repo_config = LocalRepoConfig(path=Path(args.repo))
 
-    env_config = EnvironmentConfig(repo=repo_config)
+        deployment_config = DockerDeploymentConfig(
+            image=args.docker_image,
+            python_standalone_dir="/root",
+        )
+        env_config = EnvironmentConfig(
+            repo=repo_config,
+            deployment=deployment_config,
+        )
+
+    # Prepare post-startup commands to set Neo4j environment variables
+    post_startup_commands = []
+    
+    # Collect Neo4j configuration from args or environment
+    neo4j_uri = args.neo4j_uri or os.getenv("NEO4J_URI")
+    neo4j_user = args.neo4j_user or os.getenv("NEO4J_USER")
+    neo4j_password = args.neo4j_password or os.getenv("NEO4J_PASSWORD")
+    
+    if neo4j_uri:
+        post_startup_commands.append(f"export NEO4J_URI='{neo4j_uri}'")
+        logger.info(f"  Neo4j URI configured: {neo4j_uri}")
+    if neo4j_user:
+        post_startup_commands.append(f"export NEO4J_USER='{neo4j_user}'")
+    if neo4j_password:
+        post_startup_commands.append(f"export NEO4J_PASSWORD='{neo4j_password}'")
+    
+    # Apply post-startup commands to environment config
+    if post_startup_commands:
+        env_config.post_startup_commands.extend(post_startup_commands)
 
     # Create shared environment (will be started by first agent)
     logger.info("Creating shared environment...")

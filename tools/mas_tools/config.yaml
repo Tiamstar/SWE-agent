@@ -1,0 +1,38 @@
+# MAS Tools Configuration
+# Tools specifically designed for Multi-Agent Systems
+
+tools:
+  return_result:
+    signature: "return_result <content>"
+    docstring: |
+      Return structured result data to the coordinator in a multi-agent system.
+
+      This command should be used by sub-agents to return their analysis results,
+      patches, or any other data to the coordinator. The content can be JSON,
+      patch/diff text, or plain text.
+
+      Usage:
+        return_result <content>              # Direct content
+        return_result --json '{{"key": "v"}}'  # JSON (will be validated)
+        return_result --file /path/to/file   # Read from file
+
+      Examples:
+        # Return JSON analysis result
+        return_result --json '{{"insight_type": "topology", "target_file": "src/foo.c", "summary": "Analysis complete"}}'
+
+        # Return patch content
+        return_result "$(cat /tmp/candidate.patch)"
+
+        # Return multi-line content
+        return_result "Line 1
+        Line 2
+        Line 3"
+
+      Note: This command is preferred over 'submit' for sub-agents that need to
+      return data without modifying the file system.
+    arguments:
+      - name: content
+        type: string
+        description: "Content to return to coordinator (JSON, patch, or plain text)"
+        required: true
+        argument_format: "{{value}}"

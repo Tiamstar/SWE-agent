@@ -1,0 +1,119 @@
+#!/usr/bin/env python3
+"""
+HarmonyOS Code Graph - CLI Entry Point
+连接 Agent 和代码逻辑的桥梁，负责路由指令并输出 JSON
+"""
+import sys
+import os
+import json
+import argparse
+import traceback
+
+# 1. 将 lib 目录加入系统路径，以便导入 core.py
+bin_dir = os.path.dirname(os.path.abspath(__file__))
+root_dir = os.path.dirname(bin_dir)
+lib_dir = os.path.join(root_dir, 'lib')
+sys.path.insert(0, lib_dir)
+
+# 2. 导入核心类
+try:
+    from core import CodeGraphAgent
+except ImportError as e:
+    # 将错误输出到 stderr，避免污染 stdout 的 JSON 结果
+    sys.stderr.write(f"Critical Error: Failed to import core library. {e}\n")
+    sys.exit(1)
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="HarmonyOS Code Graph Query Tool"
+    )
+    
+    # 定义主命令参数
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    # --- 拓扑类命令 ---
+    sub_dependencies = subparsers.add_parser("dependencies", help="Get file dependencies")
+    sub_dependencies.add_argument("file_name", help="Relative path of the source file")
+
+    sub_structure = subparsers.add_parser("structure", help="Get class structure")
+    sub_structure.add_argument("class_name", help="The exact name of the class")
+
+    sub_methods = subparsers.add_parser("methods", help="List class methods")
+    sub_methods.add_argument("class_name", help="The exact name of the class")
+
+    # --- 时序类命令 ---
+    sub_history = subparsers.add_parser("history", help="Get file change history")
+    sub_history.add_argument("file_name", help="The file path to inspect")
+
+    sub_intent = subparsers.add_parser("intent_search", help="Search by intent keyword")
+    sub_intent.add_argument("keyword", help="The intent keyword or phrase")
+
+    # --- 契约类命令 ---
+    sub_signature = subparsers.add_parser("signature", help="Get function signature")
+    sub_signature.add_argument("func_name", help="The name of the function/method")
+
+    sub_docs = subparsers.add_parser("docs", help="Read function documentation")
+    sub_docs.add_argument("func_name", help="The name of the function")
+
+    # --- 影响类命令 ---
+    sub_impact = subparsers.add_parser("impact", help="Analyze downstream impact")
+    sub_impact.add_argument("func_name", help="The root function name to trace")
+
+    sub_callers = subparsers.add_parser("callers", help="Find upstream callers")
+    sub_callers.add_argument("func_name", help="The callee function name")
+
+    args = parser.parse_args()
+
+    # Get project_id from environment variable
+    project_id = os.getenv("HARMONY_PROJECT_ID")
+    if not project_id:
+        error_msg = {
+            "error": "HARMONY_PROJECT_ID environment variable is required",
+            "hint": "Set HARMONY_PROJECT_ID before running this tool"
+        }
+        print(json.dumps(error_msg))
+        sys.exit(1)
+
+    # 初始化 Agent
+    agent = None
+    try:
+        agent = CodeGraphAgent(project_id=project_id)
+        qs = agent.query_service
+        result = []
+
+        # 路由逻辑
+        if args.command == "dependencies":
+            result = qs.get_file_dependencies(args.file_name)
+        elif args.command == "structure":
+            result = qs.get_class_structure(args.class_name)
+        elif args.command == "methods":
+            result = qs.get_class_methods(args.class_name)
+        elif args.command == "history":
+            result = qs.get_file_history(args.file_name)
+        elif args.command == "intent_search":
+            result = qs.search_code_by_intent(args.keyword)
+        elif args.command == "signature":
+            result = qs.get_function_signature(args.func_name)
+        elif args.command == "docs":
+            result = qs.get_function_docs(args.func_name)
+        elif args.command == "impact":
+            result = qs.get_indirect_impact(args.func_name)
+        elif args.command == "callers":
+            result = qs.get_function_callers(args.func_name)
+
+        # [关键] 结果必须是 JSON 格式，且输出到 stdout
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+
+    except Exception as e:
+        # 捕捉异常并以 JSON 格式返回错误，避免 Agent 解析崩溃
+        error_msg = {"error": str(e), "trace": traceback.format_exc()}
+        print(json.dumps(error_msg))
+        sys.exit(1)
+    finally:
+        if agent:
+            agent.close()
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,124 @@
+# Coordinator Agent Configuration
+# Role: Orchestrates the Harmony MAS workflow
+# Type: Orchestrator (manages workflow, provides task-specific context to agents)
+
+name: coordinator
+role: harmony_mas_coordinator
+type: orchestrator
+
+# Coordinator-specific configuration
+coordinator:
+  max_iterations: 3  # Max iterations for patch refinement loop
+  num_candidate_patches: 3  # Number of candidate patches to generate (can be 1-5)
+
+# Model configuration (used for coordinator-level operations if needed)
+model:
+  name: openai/qwen-3-coder  # 使用openai前缀
+  per_instance_cost_limit: 10.0
+  api_base: https://www.sophnet.com/api/open-apis/v1
+  api_key: $QWEN_API_KEY
+  temperature: 0.3
+  top_p: 0.95
+
+# Task-specific context injection prompts
+# These prompts provide context to agents, NOT defining agent capabilities
+# Agent capabilities are defined in their respective config files
+prompts:
+  # Context for Topology Agent: What to analyze
+  topology_analysis: |
+    Warning Description:
+    {initial_requirement}
+
+    Your task is to analyze the code structure and dependencies for this warning.
+    Return your findings as a structured JSON object using the 'submit' command.
+
+  # Context for Temporal Agent: What to analyze and where
+  temporal_analysis: |
+    Warning Description:
+    {initial_requirement}
+
+    Target File: {target_file}
+
+    Your task is to analyze the git history and change patterns for this warning.
+    Return your findings as a structured JSON object using the 'submit' command.
+
+  # Context for Patch Generator: Accumulated insights and requirements
+  patch_generation: |
+    Generate {num_candidates} different candidate patches to fix the following warning.
+
+    CONTEXT
+    =======
+
+    Original Warning:
+    {initial_requirement}
+
+    Topology Analysis Results:
+    {topology_insights}
+
+    History Analysis Results:
+    {history_insights}
+
+    {previous_violations_section}
+
+    REQUIREMENTS
+    ============
+    1. Generate {num_candidates} DIFFERENT approaches to fix the issue
+    2. Each patch should be a valid unified diff format
+    3. Patches should vary in approach (conservative, moderate, aggressive)
+    4. Return patches separated by "=== PATCH N ===" markers
+    5. Each patch must be complete and applicable
+       Use the 'return_result' command to return your patches to the coordinator
+       Example: return_result "<your patch content here>"
+      CRITICAL: Do NOT use markdown code blocks (```diff) in your patches.
+          Return raw diff content only.
+      
+  # Violations section (injected when retrying)
+  previous_violations_section: |
+
+    Previous Patch Violations (AVOID THESE):
+    {previous_violations}
+
+  # Context for Review Agent: What patch to verify
+  review_verification: |
+    Candidate Patch to Verify:
+
+    {patch_content}
+
+    Verify this patch using static analysis tools (cppcheck, clang-tidy).
+    Return your findings as a structured JSON object using the 'submit' command.
+
+  # Context for Contract Agent: What patch to review
+  contract_verification: |
+    Candidate Patch to Review:
+
+    {patch_content}
+
+    Verify this patch for API contract violations and assess risk.
+    Return your findings as a structured JSON object using the 'submit' command.
+
+# Workflow stage definitions
+workflow:
+  stages:
+    - INITIALIZED
+    - ANALYSIS_TOPOLOGY
+    - ANALYSIS_HISTORY
+    - PATCH_GENERATION
+    - PATCH_GENERATION_RETRY
+    - VERIFICATION_REVIEW
+    - FINALIZING
+    - FINISHED
+    - ERROR
+
+  transitions:
+    INITIALIZED: ANALYSIS_TOPOLOGY
+    ANALYSIS_TOPOLOGY: ANALYSIS_HISTORY
+    ANALYSIS_HISTORY: PATCH_GENERATION
+    PATCH_GENERATION: VERIFICATION_REVIEW
+    PATCH_GENERATION_RETRY: VERIFICATION_REVIEW
+    VERIFICATION_REVIEW: FINALIZING  # or PATCH_GENERATION_RETRY if unsafe
+    FINALIZING: FINISHED
+
+# Logging and output
+logging:
+  level: INFO
+  emoji: "🎯"

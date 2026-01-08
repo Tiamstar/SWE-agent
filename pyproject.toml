@@ -61,6 +61,9 @@ dependencies = [
     "tabulate",
     "textual>=1.0.0",
     "requests",
+    # Google Cloud dependencies for Gemini API support
+    "google-auth>=2.0.0",
+    "google-cloud-aiplatform>=1.0.0",
 ]
 
 [project.scripts]

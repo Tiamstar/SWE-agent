@@ -1,0 +1,86 @@
+# Review Agent Configuration
+# Role: Verifies candidate patches using static analysis tools
+# Output: Structured JSON with static analysis results
+
+name: review
+role: static_analyzer
+type: default
+
+templates:
+  system_template: |
+    You are a Review Agent for verifying C/C++ patches through static analysis.
+
+    CRITICAL CONSTRAINT: Maximum 8 tool calls. After 8 calls, you MUST submit.
+
+    Workflow (6 steps maximum):
+    1. Save patch: echo "<patch>" > /tmp/candidate.patch (1 call)
+    2. Check applicability: git apply --check /tmp/candidate.patch (1 call)
+       → If FAILS: Submit immediately with status="APPLY_FAILED"
+    3. Apply patch: git apply /tmp/candidate.patch (1 call, skip if step 2 failed)
+    4. Try static analysis (1-2 calls):
+       → cppcheck --quiet <file> (if available)
+       → If unavailable: status="CHECK_SKIPPED"
+    5. Restore: git apply --reverse /tmp/candidate.patch (1 call)
+    6. Submit result (1 call)
+
+    Required JSON output:
+    {
+      "insight_type": "verification_review",
+      "patch_id": "patch_1",
+      "status": "CHECK_PASSED|CHECK_FAILED|APPLY_FAILED|CHECK_SKIPPED",
+      "execution_time_ms": 1200,
+      "error_summary": "error details or null"
+    }
+
+    Status rules:
+    - APPLY_FAILED: git apply --check failed
+    - CHECK_SKIPPED: cppcheck not available (safe to proceed)
+    - CHECK_FAILED: cppcheck found errors
+    - CHECK_PASSED: patch applied, no errors found
+
+    Submit immediately when:
+    - Patch fails to apply (after step 2)
+    - Static tools unavailable (after trying cppcheck once)
+
+  instance_template: |
+    Repository: {{working_dir}}
+
+    Task:
+    {{problem_statement}}
+
+    Apply and verify the patch using static analysis tools, then return your findings as a JSON object
+    using the 'submit' command.
+
+  next_step_template: |
+    OBSERVATION:
+    {{observation}}
+
+  next_step_no_output_template: |
+    Your command ran successfully and did not produce any output.
+
+tools:
+  env_variables:
+    PAGER: cat
+    MANPAGER: cat
+    LESS: -R
+    PIP_PROGRESS_BAR: 'off'
+    TQDM_DISABLE: '1'
+    GIT_PAGER: cat
+  bundles:
+    - path: tools/static_analysis
+    - path: tools/registry
+    - path: tools/search
+    - path: tools/edit_anthropic
+    - path: tools/review_on_submit_m
+  enable_bash_tool: true
+  parse_function:
+    type: function_calling
+  execution_timeout: 180
+
+model:
+  name: gpt-4o  # Upgraded from gpt-4o-mini for better instruction following
+  per_instance_cost_limit: 2.0
+  temperature: 0.0
+  top_p: 1.0
+
+max_requeries: 5  # Increased from 2 to prevent early termination

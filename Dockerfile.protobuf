@@ -1,0 +1,60 @@
+FROM python:3.11
+
+ARG DEBIAN_FRONTEND=noninteractive
+ENV TZ=Etc/UTC
+
+# 基础工具安装（包含C/C++静态分析工具）
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    git \
+    curl \
+    wget \
+    vim \
+    nano \
+    sudo \
+    ca-certificates \
+    cppcheck \
+    clang-tidy \
+    && rm -rf /var/lib/apt/lists/*
+
+# 设置工作目录
+WORKDIR /workspace
+
+# 复制protobuf文件夹
+COPY third_party_protobuf-master /workspace/protobuf
+
+# 安装protobuf依赖
+RUN cd /workspace/protobuf && \
+    apt-get update && apt-get install -y \
+    cmake \
+    autoconf \
+    automake \
+    libtool \
+    pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+
+# 使用Python自带的pip安装必要的Python依赖（包含cpplint）
+RUN pip install --no-cache-dir \
+    wheel \
+    setuptools \
+    pydantic \
+    pydantic-settings \
+    neo4j \
+    tree-sitter \
+    cpplint
+
+# 单独安装 swe-rex 以确保 swerex-remote 可用
+RUN pip install --no-cache-dir 'swe-rex>=1.4.0'
+
+# 设置环境变量
+ENV LANG=C.UTF-8
+ENV LC_ALL=C.UTF-8
+ENV PIP_PROGRESS_BAR=off
+ENV PAGER=cat
+# Neo4j 连接配置（可通过运行容器时覆盖）
+ENV NEO4J_URI=neo4j+s://30942530.databases.neo4j.io
+ENV NEO4J_USER=neo4j
+ENV NEO4J_PASSWORD=6NiZaEv1hhBkOevNzb08zguuZxWChTxebS6JgaMxxFI
+
+# 设置容器启动时的默认shell
+CMD ["/bin/bash"]

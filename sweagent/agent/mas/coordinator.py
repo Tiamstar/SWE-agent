@@ -61,6 +61,7 @@ class RepairCoordinator:
         rca_config: DefaultAgentConfig,
         patch_config: DefaultAgentConfig,
         output_dir: Path | None = None,
+        keep_env_alive: bool = False,
     ):
         """Initialize the Star Topology Coordinator.
 
@@ -69,10 +70,12 @@ class RepairCoordinator:
             rca_config: Configuration for RCA (Detective) agent
             patch_config: Configuration for Patch (Developer) agent
             output_dir: Base directory for outputs. If None, creates timestamped dir in trajectories/
+            keep_env_alive: If True, don't close environment after workflow completes
         """
         self.env = env
         self.rca_config = rca_config
         self.patch_config = patch_config
+        self.keep_env_alive = keep_env_alive
 
         # Create timestamped output directory in trajectories/
         if output_dir is None:
@@ -92,6 +95,7 @@ class RepairCoordinator:
         logger.info(f"  RCA config: {rca_config.name}")
         logger.info(f"  Patch config: {patch_config.name}")
         logger.info(f"  Output dir: {output_dir}")
+        logger.info(f"  Keep env alive: {keep_env_alive}")
         logger.info("=" * 60)
 
     @classmethod
@@ -188,12 +192,16 @@ class RepairCoordinator:
             return f"ERROR: Workflow failed - {e}"
 
         finally:
-            # Close environment (if it was started)
-            logger.info(">>> Hub: Cleaning up environment")
-            try:
-                self.env.close()
-            except Exception as e:
-                logger.warning(f"  Failed to close env: {e}")
+            # Close environment (if it was started and not in persistent mode)
+            if self.keep_env_alive:
+                logger.info(">>> Hub: Keeping environment alive (persistent mode)")
+                logger.info(f"  Environment will remain active for subsequent runs")
+            else:
+                logger.info(">>> Hub: Cleaning up environment")
+                try:
+                    self.env.close()
+                except Exception as e:
+                    logger.warning(f"  Failed to close env: {e}")
 
     def _initialize_shared_environment(self) -> None:
         """Initialize the shared environment that will be used by all agents.

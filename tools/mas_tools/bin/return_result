@@ -1,0 +1,79 @@
+#!/usr/bin/env python3
+"""
+Return Result Tool for Multi-Agent Systems.
+
+This tool is designed specifically for sub-agents in a multi-agent system
+to return structured data (JSON, patches, etc.) to the coordinator.
+
+Usage:
+    return_result <content>
+    return_result --json '{"key": "value"}'
+    return_result --file /path/to/file
+
+Examples:
+    # Return JSON data
+    return_result --json '{"insight_type": "topology", "target_file": "foo.c"}'
+
+    # Return patch content
+    return_result "$(cat /tmp/my_patch.diff)"
+
+    # Return content from file
+    return_result --file /tmp/result.json
+"""
+
+import argparse
+import sys
+import json
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Return result data to coordinator in multi-agent system"
+    )
+
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument(
+        "content",
+        nargs="?",
+        help="Direct content to return (string, JSON, patch, etc.)"
+    )
+    group.add_argument(
+        "--json",
+        help="JSON string to return (will be validated)"
+    )
+    group.add_argument(
+        "--file",
+        help="Read content from file path"
+    )
+
+    args = parser.parse_args()
+
+    # Determine content source
+    if args.json:
+        # Validate JSON
+        try:
+            json.loads(args.json)
+            content = args.json
+        except json.JSONDecodeError as e:
+            print(f"ERROR: Invalid JSON: {e}", file=sys.stderr)
+            sys.exit(1)
+    elif args.file:
+        # Read from file
+        try:
+            with open(args.file, 'r', encoding='utf-8') as f:
+                content = f.read()
+        except Exception as e:
+            print(f"ERROR: Failed to read file {args.file}: {e}", file=sys.stderr)
+            sys.exit(1)
+    else:
+        # Direct content
+        content = args.content
+
+    # Output with special markers for coordinator to detect
+    print("<<MAS_AGENT_RESULT>>")
+    print(content)
+    print("<<MAS_AGENT_RESULT>>")
+
+
+if __name__ == "__main__":
+    main()

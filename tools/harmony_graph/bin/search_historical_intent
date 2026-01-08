@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Wrapper for search_historical_intent tool
+# Routes to code_graph with 'intent_search' subcommand
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+exec "${SCRIPT_DIR}/code_graph" intent_search "$@"

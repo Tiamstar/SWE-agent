@@ -1,0 +1,12 @@
+{
+  "env": {
+    "ANTHROPIC_AUTH_TOKEN": "sk-tAnS4OSYrf6Oo7psbhr5wa4qEVabOy1gdHslJYwTj3paKwIp",
+    "ANTHROPIC_BASE_URL": "https://cc.zhihuiapi.top",
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": 1,
+    "API_TIMEOUT_MS": 600000
+  },
+  "permissions": {
+    "allow": [],
+    "deny": []
+  }
+}

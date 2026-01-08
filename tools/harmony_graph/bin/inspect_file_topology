@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Wrapper for inspect_file_topology tool
+# Routes to code_graph with 'dependencies' subcommand
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+exec "${SCRIPT_DIR}/code_graph" dependencies "$@"

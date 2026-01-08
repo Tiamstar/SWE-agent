@@ -1,0 +1,124 @@
+tools:
+  # =================================================================
+  # 1. 拓扑分析 Agent (Topology Agent) 工具集
+  # 目标：解析静态结构、文件依赖、类图
+  # =================================================================
+  inspect_file_topology:
+    signature: |
+      inspect_file_topology <file_name>
+    docstring: >
+      Analyzes the physical dependencies of a file (e.g., #include headers).
+      Use this to determine module coupling before making changes.
+    arguments:
+      - name: file_name
+        type: string
+        description: Relative path of the source file (e.g., 'foundation/ace/adapter.cpp')
+        required: true
+
+  inspect_class_schema:
+    signature: |
+      inspect_class_schema <class_name>
+    docstring: >
+      Retrieves the internal structure of a class, including member variables (fields) and types.
+      Use this to understand class member layout before making changes.
+    arguments:
+      - name: class_name
+        type: string
+        description: The exact name of the class
+        required: true
+
+  list_class_methods:
+    signature: |
+      list_class_methods <class_name>
+    docstring: >
+      Lists all methods declared within a specific class.
+      Helpful to get an overview of class capabilities.
+    arguments:
+      - name: class_name
+        type: string
+        description: The exact name of the class
+        required: true
+
+  # =================================================================
+  # 2. 时序感知 Agent (Temporal Agent) 工具集
+  # 目标：挖掘变更历史、开发者意图、热点代码
+  # =================================================================
+  search_historical_intent:
+    signature: |
+      search_historical_intent <keyword>
+    docstring: >
+      Searches git commit messages for semantic keywords (e.g., "fix memory leak", "refactor ipc").
+      Use this to find how similar bugs were fixed in the past.
+    arguments:
+      - name: keyword
+        type: string
+        description: The intent keyword or phrase to search for
+        required: true
+
+  view_file_changelog:
+    signature: |
+      view_file_changelog <file_name>
+    docstring: >
+      Retrieves the recent git commit history for a specific file.
+      Use this to identify who modified the file recently and why.
+    arguments:
+      - name: file_name
+        type: string
+        description: The file path to inspect
+        required: true
+
+  # =================================================================
+  # 3. 契约验证 Agent (Contract Agent) 工具集
+  # 目标：确保接口一致性、类型安全、符合文档规范
+  # =================================================================
+  verify_func_signature:
+    signature: |
+      verify_func_signature <func_name>
+    docstring: >
+      [CRITICAL] Returns the exact function signature (param types, return type).
+      MUST be used before generating patches to ensure type consistency.
+    arguments:
+      - name: func_name
+        type: string
+        description: The name of the function/method
+        required: true
+
+  read_func_documentation:
+    signature: |
+      read_func_documentation <func_name>
+    docstring: >
+      Reads the documentation/comments associated with a function.
+      Use this to understand the "logical contract" and preconditions.
+    arguments:
+      - name: func_name
+        type: string
+        description: The name of the function
+        required: true
+
+  # =================================================================
+  # 4. 影响传播 Agent (Impact Agent) 工具集
+  # 目标：风险预警、调用链分析
+  # =================================================================
+  trace_downstream_impact:
+    signature: |
+      trace_downstream_impact <func_name>
+    docstring: >
+      Analyzes the call chain to see what downstream functions are called by the target.
+      Use this to estimate the "spread" of your logic changes.
+    arguments:
+      - name: func_name
+        type: string
+        description: The root function name to trace
+        required: true
+
+  find_upstream_callers:
+    signature: |
+      find_upstream_callers <func_name>
+    docstring: >
+      Identifies all functions that invoke the target function.
+      Use this to check if changing the target will break existing clients.
+    arguments:
+      - name: func_name
+        type: string
+        description: The callee function name
+        required: true

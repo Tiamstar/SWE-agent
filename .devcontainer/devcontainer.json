@@ -1,8 +1,12 @@
 {
     "name": "SWE-Agent Codespace",
-    "image": "mcr.microsoft.com/vscode/devcontainers/miniconda:0-3",
-    "customizations":{
-        "vscode":{
+    // 1. 删除这里的 "build" 块，构建逻辑应写在 docker-compose 文件中
+    "dockerComposeFile": "docker-compose.neo4j.yml",
+    "service": "app", // 确保这是 compose 文件中定义的 service 名
+    "workspaceFolder": "/workspaces/${localWorkspaceFolderBasename}",
+    
+    "customizations": {
+        "vscode": {
             "extensions": [
                 "ms-python.python",
                 "ms-azuretools.vscode-docker",
@@ -10,16 +14,32 @@
             ]
         }
     },
-    "onCreateCommand": "./.devcontainer/oncreate.sh",
-    "postCreateCommand": "./.devcontainer/postcreate.sh",
+    "onCreateCommand": "chmod +x ./.devcontainer/oncreate.sh && ./.devcontainer/oncreate.sh",
+    "postCreateCommand": "chmod +x ./.devcontainer/postcreate.sh && ./.devcontainer/postcreate.sh",
     "features": {
-        "ghcr.io/devcontainers/features/docker-in-docker:2": {},
+        "ghcr.io/devcontainers/features/common-utils:2.5.5": {
+        "installZsh": true,
+        "configureZshAsDefaultShell": true,
+        "username": "vscode",
+        "userUid": "1000",
+        "userGid": "1000"
+    },
+        "ghcr.io/devcontainers/features/docker-in-docker:2": {
+            "version": "latest",
+            "moby": false
+        },
         "ghcr.io/devcontainers/features/sshd:1": {
-    "version": "latest"
-  }
+            "version": "latest"
+        }
     },
     "mounts": [
         "source=/var/run/docker.sock,target=/var/run/docker.sock,type=bind"
     ],
-    "remoteUser": "vscode"
+    "remoteUser": "vscode",
+    "remoteEnv": {
+        "NEO4J_URI": "bolt://localhost:7687",
+        "NEO4J_USER": "neo4j",
+        "NEO4J_PASSWORD": "swe-agent-local"
+    }
+    // "runServices": ["neo4j"] // 在 docker-compose 模式下通常不需要单独写，compose 会自动处理依赖
 }
