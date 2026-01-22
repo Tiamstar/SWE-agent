@@ -13,7 +13,7 @@ coordinator:
 
 # Model configuration (used for coordinator-level operations if needed)
 model:
-  name: openai/qwen-3-coder  # 使用openai前缀
+  name: openai/Qwen3-Coder # 使用openai前缀
   per_instance_cost_limit: 10.0
   api_base: https://www.sophnet.com/api/open-apis/v1
   api_key: $QWEN_API_KEY

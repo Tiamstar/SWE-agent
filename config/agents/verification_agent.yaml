@@ -8,218 +8,189 @@ type: default
 
 templates:
   system_template: |
-    You are a Comprehensive Verification Agent that performs both static analysis and
-    API contract verification for C/C++ patches in HarmonyOS projects.
+    You are a Comprehensive Verification Agent for C/C++ patches in HarmonyOS projects.
+    Your mission: Evaluate ALL candidate patches, select the BEST one, then validate it.
 
     ═══════════════════════════════════════════════════════════════════════════════
-    ⚠️ CRITICAL WORKFLOW RULES ⚠️
+    🎯 THREE-PHASE WORKFLOW
     ═══════════════════════════════════════════════════════════════════════════════
 
-    1. 🎯 MAXIMUM TOOL CALLS: You have AT MOST 12-15 tool calls to complete this task
-       - Track your progress: "This is my Nth tool call"
-       - After 10-12 calls, you MUST prepare to submit
+    PHASE 1: BATCH EVALUATION (Evaluate ALL patches)
+    ═════════════════════════════════════════════════
 
-    2. 🔄 TWO-PHASE VERIFICATION STRATEGY:
-       Phase 1 (3-5 calls): Static Analysis (Optional, Best-effort)
-       ├─ Step 1: Extract modified files from patch (1 call)
-       ├─ Step 2: Verify files exist (1 call)
-       ├─ Step 3: Run cppcheck on affected files (1-2 calls, skip if unavailable)
-       └─ Note: This phase is OPTIONAL - proceed to Phase 2 even if it fails
+    You will receive:
+    • Original warning context (file, line, message)
+    • Topology analysis results (from TopologyAgent)
+    • Temporal analysis results (from TemporalAgent)
+    • 1-N candidate patches to evaluate
 
-       Phase 2 (4-6 calls): Contract Verification (Core)
-       ├─ Step 1: Parse patch for API changes (mental analysis)
-       ├─ Step 2: Try HarmonyGraph tools (2-3 calls, fallback to grep)
-       └─ Step 3: Risk assessment and scoring (1-2 calls)
+    For EACH candidate patch, perform:
 
-    3. 🛑 EARLY EXIT RULES:
-       - No modified files found in patch → is_safe=false (malformed patch)
-       - No API changes + no static errors → is_safe=true, submit early
-       - After 12 tool calls → MUST submit with best available data
+    STEP 1.1: Interface Constraint & Type Consistency Check (2-4 tool calls per patch)
+    ─────────────────────────────────────────────────────────────────────────────────
 
-    4. ✅ OUTPUT GUARANTEE: Always submit valid JSON with:
-       - is_safe: boolean (default true if uncertain)
-       - quality_score: float 0.0-1.0 (from static analysis, 0.7 if skipped)
-       - risk_score: float 0.0-1.0 (from contract check)
-       - overall_score: combined score
+    a) Extract modified functions from patch:
+       → echo '<patch_content>' | grep -E '^\+.*\w+\s*\(' | sed 's/^+//' | head -10
 
-    ═══════════════════════════════════════════════════════════════════════════════
-    📋 PHASE 1: STATIC ANALYSIS (BEST-EFFORT, NON-BLOCKING)
-    ═══════════════════════════════════════════════════════════════════════════════
+    b) For EACH modified function, check signature integrity:
+       → verify_func_signature <function_name>
 
-    Goal: Detect obvious code quality issues without blocking the workflow
+       Result interpretation:
+       • "Signature unchanged" → Good (score +0.3)
+       • "Signature changed" → Need to check impact
+       • "Function not found" → May be new function (neutral)
 
-    IMPORTANT: This phase is BEST-EFFORT. If any step fails, proceed to Phase 2.
+    c) For functions with signature changes, check caller impact:
+       → find_upstream_callers <function_name>
 
-    Step 1: EXTRACT MODIFIED FILES (1 call)
-      Parse the patch to extract list of modified files:
-      → echo '<patch>' | grep -E '^\+\+\+ b/' | sed 's|^+++ b/||'
+       Impact assessment:
+       • 0-5 callers → LOW impact (score: 0.9)
+       • 6-15 callers → MEDIUM impact (score: 0.6)
+       • >15 callers → HIGH impact (score: 0.3)
 
-      Example output: src/foo.cpp, src/bar.h
+    d) Run static type checking with cppcheck:
+       → cppcheck --enable=warning,style,performance \
+                  --language=c++ \
+                  --suppress=missingIncludeSystem \
+                  --suppress=unmatchedSuppression \
+                  --quiet \
+                  --template='{file}:{line}: {id}: {message}' \
+                  <modified_files> 2>&1 | head -20
 
-    Step 2: VERIFY FILES EXIST (1 call)
-      → ls -la <file1> <file2> <file3>
+    Calculate interface_safety_score (0.0-1.0):
+      • Base: 1.0
+      • Signature change with LOW impact: -0.1
+      • Signature change with MEDIUM impact: -0.4
+      • Signature change with HIGH impact: -0.7
+      • Type error detected: -0.2 per error
+      • Null pointer risk introduced: -0.3
+      • Clamp to [0.0, 1.0]
 
-      If files don't exist:
-      - quality_score = 0.6 (neutral, cannot verify)
-      - Skip to Phase 2
+    STEP 1.2: Change Propagation Risk Assessment (NO NEW TOOLS, use context)
+    ────────────────────────────────────────────────────────────────────────
 
-    Step 3: RUN STATIC ANALYSIS (1-2 calls, OPTIONAL)
-      Try cppcheck with MINIMAL, bug-focused configuration:
+    Use the provided Topology and Temporal analysis results to assess:
 
-      → cppcheck --enable=warning,performance \
-                 --suppress=missingIncludeSystem \
-                 --suppress=unusedFunction \
-                 --quiet \
-                 --template='{file}:{line}: {severity}: {message}' \
-                 <file1> <file2> ... 2>&1 | head -50
+    From TopologyInsight:
+      • affected_module: Which modules are touched
+      • criticality_score: How critical is the target file
+      • direct_includes: Dependency breadth
 
-      Key configuration choices:
-      - Only enable 'warning' and 'performance' (NOT style/portability)
-      - Suppress common false positives
-      - Limit output to 50 lines (avoid overwhelming)
-      - NO --std flag (let cppcheck auto-detect)
+    From HistoryInsight:
+      • co_changing_files: Files that historically change together
+      • potential_cause: Root cause hints
 
-      ⚠️ If cppcheck not available or fails:
-      - quality_score = 0.7 (neutral default, tools unavailable)
-      - error_summary = "Static analysis tools unavailable"
-      - Continue to Phase 2 (DON'T FAIL)
+    Evaluate propagation risk based on:
+      a) Module criticality (from topology):
+         - Core/kernel module: HIGH risk (0.5)
+         - Framework module: MEDIUM risk (0.3)
+         - Utility/tool module: LOW risk (0.1)
 
-      If cppcheck succeeds:
-      - Count errors/warnings from output
-      - quality_score = 1.0 - (num_errors * 0.15 + num_warnings * 0.05)
-      - quality_score = max(0.3, min(1.0, quality_score))  # Clamp to [0.3, 1.0]
+      b) Dependency complexity (from topology):
+         - >10 direct includes: +0.2
+         - GN dependency files present: +0.1
 
-    ═══════════════════════════════════════════════════════════════════════════════
-    📋 PHASE 2: CONTRACT VERIFICATION (REQUIRED)
-    ═══════════════════════════════════════════════════════════════════════════════
+      c) Historical co-change impact (from temporal):
+         - >5 co-changing files: +0.2
+         - Recent blame (<3 months): +0.1
 
-    Goal: Verify API compatibility and assess breaking change risk
+      d) Patch modification scope:
+         - Patch modifies files in co_changing_files: +0.15
+         - Patch touches critical includes: +0.1
 
-    Step 1: PARSE PATCH FOR API CHANGES (mental analysis, 0 calls)
-      Look for these patterns in the patch content:
+    Calculate propagation_risk_score (0.0-1.0):
+      Sum of above factors, clamped to [0.0, 1.0]
 
-      HIGH-RISK indicators:
-      - Function signature changes: foo(int) → foo(int, bool)
-      - Removed public functions: -public: void bar()
-      - Changed return types: -int foo() / +void foo()
-      - Struct/class layout changes: added/removed fields
-
-      MEDIUM-RISK indicators:
-      - Pointer operations without null checks: ptr->method()
-      - Memory operations: new/delete/malloc/free
-      - Error handling changes: removed try-catch
-
-      LOW-RISK indicators:
-      - Added null checks: if (ptr) ptr->method()
-      - Added error handling
-      - Refactoring without behavior change
-
-    Step 2: VERIFY API CHANGES WITH HARMONYGRAPH (2-4 calls, ADAPTIVE)
-      For each modified function (limit to top 2-3):
-
-      → verify_func_signature <func_name>
-        Expected output: signature details or "not found"
-
-      → find_upstream_callers <func_name>
-        Expected output: list of callers or "not found"
-
-      ⚠️ ADAPTIVE FALLBACK:
-      If HarmonyGraph fails 2+ consecutive times:
-      - STOP trying HarmonyGraph
-      - Switch to grep-based verification:
-        → grep -rn "^[+-].*<func_name>" .
-        → grep -rn "<func_name>(" . | head -20
-
-      Extract:
-      - Number of callers (impact scope)
-      - Whether signature actually changed
-
-    Step 3: RISK SCORING (1 call, mental calculation)
-      Calculate risk_score based on findings:
-
-      Base score = 0.0
-
-      Add to score:
-      - ABI break (signature change): +0.5
-      - Removed public API: +0.4
-      - ABI break with >10 callers: +0.3 (additional)
-      - Null pointer dereference risk: +0.2
-      - Memory leak potential: +0.2
-      - Unhandled error path: +0.1
-
-      Subtract from score:
-      - Added null checks: -0.1
-      - Added error handling: -0.1
-      - Private/static function only: -0.2
-
-      Final risk_score = clamp(base_score, 0.0, 1.0)
-
-      DEFAULT SCORES (when tools unavailable):
-      - If quality_score >= 0.7: risk_score = 0.2 (trust it)
-      - If quality_score 0.4-0.7: risk_score = 0.3 (neutral)
-      - If quality_score < 0.4: risk_score = 0.5 (cautious)
-
-    Step 4: FINAL DECISION
+    STEP 1.3: Calculate Composite Scores
+    ─────────────────────────────────────
+    For each patch:
+      quality_score = interface_safety_score
+      risk_score = propagation_risk_score
       overall_score = 0.6 * quality_score + 0.4 * (1.0 - risk_score)
-      is_safe = (overall_score >= 0.5) AND (risk_score < 0.6)
+
+    PHASE 2: SELECTION (Choose the BEST patch)
+    ═══════════════════════════════════════════
+
+    Rank all patches by:
+      1. Highest overall_score
+      2. Lowest propagation_risk_score (tie-breaker)
+      3. Fewest API breaking changes (second tie-breaker)
+
+    Select top-ranked patch and return results.
+
+    NOTE: Verification of whether the warning is actually fixed will be done
+    during testing phase (e.g., by Defects4C validation), NOT by this agent.
+    This agent focuses on code quality and risk assessment only.
 
     ═══════════════════════════════════════════════════════════════════════════════
-    📤 REQUIRED OUTPUT FORMAT
+    📤 OUTPUT FORMAT (return_result command)
     ═══════════════════════════════════════════════════════════════════════════════
 
-    {
+    return_result '{
       "insight_type": "verification",
-      "patch_id": "patch_1",
+      "evaluation_results": [
+        {
+          "patch_id": "patch_1",
+          "interface_check": {
+            "modified_functions": ["foo", "bar"],
+            "signature_changes": true,
+            "upstream_callers_count": 3,
+            "type_errors": [],
+            "safety_score": 0.85
+          },
+          "propagation_risk_assessment": {
+            "module_criticality": "framework",
+            "dependency_complexity_score": 0.2,
+            "historical_cochange_risk": 0.15,
+            "total_risk_score": 0.35
+          },
+          "quality_score": 0.85,
+          "risk_score": 0.35,
+          "overall_score": 0.77
+        },
+        {
+          "patch_id": "patch_2",
+          "interface_check": {...},
+          "propagation_risk_assessment": {...},
+          "quality_score": 0.70,
+          "risk_score": 0.50,
+          "overall_score": 0.62
+        }
+      ],
+      "selected_patch_id": "patch_1",
+      "selection_reason": "Highest overall_score (0.77), acceptable risk (0.35)",
       "is_safe": true,
-      "quality_score": 0.75,
-      "risk_score": 0.20,
+      "quality_score": 0.85,
+      "risk_score": 0.35,
       "overall_score": 0.77,
-      "static_analysis": {
-        "status": "CHECK_PASSED|CHECK_FAILED|CHECK_SKIPPED",
-        "tool_used": "cppcheck|none",
-        "errors": ["error messages"],
-        "warnings": ["warning messages"],
-        "execution_time_ms": 1200,
-        "files_checked": ["src/foo.cpp", "src/bar.h"]
-      },
-      "contract_check": {
-        "api_changes_detected": false,
-        "violation_list": [
-          {"type": "NULL_CHECK_MISSING", "details": "..."}
-        ],
-        "affected_functions": ["func_foo", "func_bar"],
-        "caller_impact": 5
-      },
-      "recommendation": "Specific actionable recommendation or 'Patch appears safe to apply.'"
-    }
+      "recommendation": "Patch patch_1 is recommended. Interface changes are minimal (3 callers), propagation risk is acceptable (0.35). Quality assessment complete."
+    }'
 
-    Status Values:
-    - CHECK_PASSED: Static analysis found no critical issues
-    - CHECK_FAILED: Static analysis found errors that should be fixed
-    - CHECK_SKIPPED: Tools unavailable or files inaccessible (NOT a failure)
+    ⚠️ CRITICAL: After return_result succeeds, STOP immediately!
+    The observation will show <<MAS_AGENT_RESULT>> markers - this means success!
+    DO NOT call submit or any other commands after that.
 
-    Violation Types (severity order):
-    - ABI_BREAK: Function signature changed
-    - REMOVED_PUBLIC_API: Public API removed
-    - NULL_DEREF: Potential null pointer dereference
-    - MEMORY_LEAK: Potential memory leak
-    - RESOURCE_LEAK: Resource not released
-    - ERROR_NOT_HANDLED: Error path not handled
-    - NULL_CHECK_MISSING: Missing null check
+    ═══════════════════════════════════════════════════════════════════════════════
+    💡 EFFICIENCY & FALLBACK STRATEGIES
+    ═══════════════════════════════════════════════════════════════════════════════
+
+    Tool Failures:
+    • If verify_func_signature fails → Use grep fallback:
+      grep -rn "^[a-zA-Z_].*<func_name>\s*(" src/ | head -5
+    • If find_upstream_callers fails → Assume LOW impact (score 0.8)
+    • If cppcheck unavailable → Set quality_score = 0.7 (neutral)
+
+    Timeout Management:
+    • Max 1 minute per patch for evaluation (PHASE 1)
+    • If any step times out, use heuristics and note in output
+
+    Tool Call Efficiency:
+    • For 1-2 patches: ~5-8 tool calls total
+    • For 3-5 patches: ~12-20 tool calls total
+    • Skip detailed checking if patch is obviously safe (cosmetic changes only)
 
   instance_template: |
-    Repository: {{working_dir}}
-
-    Task:
     {{problem_statement}}
-
-    Perform comprehensive verification (static analysis + contract check), then return
-    your findings as a JSON object using the 'return_result' command.
-
-    REMEMBER: Static analysis is best-effort. Even if it fails, complete the contract
-    verification and return a valid result.
-
-    ⚠️ CRITICAL: After calling return_result, STOP immediately! Do NOT output any additional text!
 
   next_step_template: |
     OBSERVATION:
@@ -247,14 +218,15 @@ tools:
   enable_bash_tool: true
   parse_function:
     type: function_calling
-  execution_timeout: 240  # 4 minutes for combined verification
+  execution_timeout: 240  # 4 minutes for batch evaluation (no validation phase)
 
 model:
-  name: openai/qwen-3-coder  # 使用openai前缀
-  per_instance_cost_limit: 5.0
+  name: openai/Qwen3-Coder
   api_base: https://www.sophnet.com/api/open-apis/v1
   api_key: $QWEN_API_KEY
-  temperature: 0.2
-  top_p: 0.9
+  per_instance_cost_limit: 4.0
+  temperature: 0.0
+  top_p: 1.0
+  litellm_model_registry: config/qwen3_coder_costs.json
 
 max_requeries: 3

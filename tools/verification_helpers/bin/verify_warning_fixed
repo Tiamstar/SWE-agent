@@ -1,0 +1,140 @@
+#!/usr/bin/env bash
+# Verify if a specific cppcheck warning is fixed by a patch
+#
+# Usage: verify_warning_fixed <patch_file> <target_file> <line_number> <warning_pattern>
+#
+# Example: verify_warning_fixed patch.diff src/foo.c 142 "nullPointer"
+#
+# Returns:
+#   0 - Warning is fixed (no longer appears)
+#   1 - Warning still exists
+#   2 - Error (file not found, patch apply failed, etc.)
+
+set -uo pipefail
+
+if [ $# -lt 3 ]; then
+    echo "Usage: verify_warning_fixed <patch_file> <target_file> <line_number> [warning_pattern]"
+    echo ""
+    echo "Arguments:"
+    echo "  patch_file       - Path to unified diff file"
+    echo "  target_file      - File to check (e.g., src/foo.c)"
+    echo "  line_number      - Line number of original warning"
+    echo "  warning_pattern  - Optional: Specific warning to check for (e.g., 'nullPointer')"
+    echo ""
+    echo "Returns:"
+    echo "  0 - Warning fixed"
+    echo "  1 - Warning still exists"
+    echo "  2 - Error"
+    exit 2
+fi
+
+PATCH_FILE="$1"
+TARGET_FILE="$2"
+LINE_NUMBER="$3"
+WARNING_PATTERN="${4:-}"
+
+# Create temporary workspace
+TEMP_DIR=$(mktemp -d)
+trap "rm -rf ${TEMP_DIR}" EXIT
+
+# Backup original file
+if [ ! -f "$TARGET_FILE" ]; then
+    echo "ERROR: Target file not found: $TARGET_FILE" >&2
+    exit 2
+fi
+
+cp "$TARGET_FILE" "${TEMP_DIR}/original.c"
+
+# Apply patch
+if [ ! -f "$PATCH_FILE" ]; then
+    echo "ERROR: Patch file not found: $PATCH_FILE" >&2
+    exit 2
+fi
+
+# Try to apply patch (non-destructive check first)
+# Try multiple strategies to apply the patch
+PATCH_LEVEL=""
+PATCH_APPLIED=false
+
+# Strategy 1: Try -p1 (standard git diff format)
+if patch --dry-run -p1 -f < "$PATCH_FILE" > /dev/null 2>&1; then
+    PATCH_LEVEL="-p1"
+    PATCH_APPLIED=true
+# Strategy 2: Try -p0 (no path stripping)
+elif patch --dry-run -p0 -f < "$PATCH_FILE" > /dev/null 2>&1; then
+    PATCH_LEVEL="-p0"
+    PATCH_APPLIED=true
+# Strategy 3: Try applying to specific file directly (ignore paths in patch)
+elif patch --dry-run "$TARGET_FILE" < "$PATCH_FILE" > /dev/null 2>&1; then
+    PATCH_LEVEL="--target=$TARGET_FILE"
+    PATCH_APPLIED=true
+# Strategy 4: Try with --force and --forward (skip already applied hunks)
+elif patch --dry-run -p1 --forward --force < "$PATCH_FILE" > /dev/null 2>&1; then
+    PATCH_LEVEL="-p1 --forward --force"
+    PATCH_APPLIED=true
+fi
+
+if [ "$PATCH_APPLIED" = false ]; then
+    echo "ERROR: Patch cannot be applied to current codebase" >&2
+    echo "DEBUG: Patch file content:" >&2
+    head -20 "$PATCH_FILE" >&2
+    echo "DEBUG: Target file exists: $([ -f "$TARGET_FILE" ] && echo 'yes' || echo 'no')" >&2
+    echo "DEBUG: Tried patch levels: -p1, -p0, direct, --forward" >&2
+    exit 2
+fi
+
+# Apply patch for real
+if [ "$PATCH_LEVEL" = "--target=$TARGET_FILE" ]; then
+    if ! patch "$TARGET_FILE" < "$PATCH_FILE" > /dev/null 2>&1; then
+        echo "ERROR: Failed to apply patch" >&2
+        exit 2
+    fi
+else
+    if ! patch $PATCH_LEVEL < "$PATCH_FILE" > /dev/null 2>&1; then
+        echo "ERROR: Failed to apply patch" >&2
+        exit 2
+    fi
+fi
+
+# Run cppcheck on the patched file
+# Focus on the specific line and nearby context (±10 lines)
+START_LINE=$((LINE_NUMBER > 10 ? LINE_NUMBER - 10 : 1))
+END_LINE=$((LINE_NUMBER + 10))
+
+CPPCHECK_OUTPUT=$(cppcheck \
+    --enable=warning,performance,portability \
+    --language=c++ \
+    --suppress=missingIncludeSystem \
+    --suppress=unmatchedSuppression \
+    --quiet \
+    --template='{file}:{line}:{column}: {severity}: {id}: {message}' \
+    "$TARGET_FILE" 2>&1 || true)
+
+# Restore original file
+cp "${TEMP_DIR}/original.c" "$TARGET_FILE"
+
+# Check if warning still exists
+if [ -n "$WARNING_PATTERN" ]; then
+    # Check for specific warning pattern
+    if echo "$CPPCHECK_OUTPUT" | grep -q "${TARGET_FILE}:${LINE_NUMBER}.*${WARNING_PATTERN}"; then
+        echo "FAILED: Warning still exists at ${TARGET_FILE}:${LINE_NUMBER}"
+        echo "Output:"
+        echo "$CPPCHECK_OUTPUT" | grep "${TARGET_FILE}:${LINE_NUMBER}" || true
+        exit 1
+    fi
+else
+    # Check for any warning at the target line
+    if echo "$CPPCHECK_OUTPUT" | grep -q "${TARGET_FILE}:${LINE_NUMBER}:"; then
+        echo "FAILED: Warning still exists at ${TARGET_FILE}:${LINE_NUMBER}"
+        echo "Output:"
+        echo "$CPPCHECK_OUTPUT" | grep "${TARGET_FILE}:${LINE_NUMBER}"
+        exit 1
+    fi
+fi
+
+echo "SUCCESS: Warning at ${TARGET_FILE}:${LINE_NUMBER} is fixed"
+if [ -n "$CPPCHECK_OUTPUT" ]; then
+    echo "Note: Other warnings may exist:"
+    echo "$CPPCHECK_OUTPUT"
+fi
+exit 0

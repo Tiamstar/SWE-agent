@@ -1,0 +1,43 @@
+# Verification Helpers Tool Bundle
+# Provides utilities for patch validation and warning verification
+
+name: verification_helpers
+description: Helper tools for patch verification and validation
+
+tools:
+  verify_warning_fixed:
+    signature: "verify_warning_fixed <patch_file> <target_file> <line_number> [<warning_pattern>]"
+    docstring: |
+      Verify if a specific cppcheck warning is fixed by applying a patch.
+
+      This tool applies a patch to a temporary copy of the target file and runs
+      cppcheck to verify if the warning at the specified line is fixed.
+
+      Usage:
+        verify_warning_fixed <patch_file> <target_file> <line_number> [warning_pattern]
+
+      Examples:
+        verify_warning_fixed patch.diff src/foo.c 142
+        verify_warning_fixed patch.diff src/foo.c 142 "nullPointer"
+
+      Exit codes:
+        0 - Warning is fixed
+        1 - Warning still exists
+        2 - Error (patch can't apply, file not found, etc.)
+    arguments:
+      - name: patch_file
+        type: string
+        description: Path to the patch file to apply
+        required: true
+      - name: target_file
+        type: string
+        description: Target file to check for warnings
+        required: true
+      - name: line_number
+        type: string
+        description: Line number where the warning occurs
+        required: true
+      - name: warning_pattern
+        type: string
+        description: Optional warning pattern to match (e.g., "nullPointer")
+        required: false

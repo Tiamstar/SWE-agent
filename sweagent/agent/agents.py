@@ -943,6 +943,9 @@ class DefaultAgent(AbstractAgent):
     def handle_submission(self, step: StepOutput, *, observation="", force_submission: bool = False) -> StepOutput:
         """Check if there was a submission in the observation and handle it.
 
+        Also checks for MAS agent results (<<MAS_AGENT_RESULT>>) which work similarly to submissions
+        but are used by sub-agents in multi-agent systems to return results without modifying files.
+
         Args:
             step:
             observation: If specified, will use this rather than stepobservation
@@ -953,6 +956,23 @@ class DefaultAgent(AbstractAgent):
         """
         step = step.model_copy(deep=True)
         assert self.tools is not None
+
+        # Check for MAS agent result first (multi-agent systems)
+        is_mas_result = self.tools.check_for_mas_result(observation or step.observation)
+        if is_mas_result:
+            # For MAS results, we mark as submitted without reading a file
+            # The result is already in the observation within <<MAS_AGENT_RESULT>> markers
+            step.submission = observation or step.observation
+            step.observation = observation or step.observation
+            if not step.exit_status:
+                step.exit_status = "mas_result_submitted"
+            else:
+                step.exit_status = f"mas_result_submitted ({step.exit_status})"
+            step.done = True
+            self.logger.info("Found MAS agent result (multi-agent system)")
+            return step
+
+        # Check for standard submission (file-based)
         is_submission = self.tools.check_for_submission_cmd(observation or step.observation)
         if is_submission or force_submission:
             assert self._env is not None

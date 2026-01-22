@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+# Safe git show wrapper that limits output to prevent context window explosion
+#
+# Usage: git_safe_show [options] <commit>
+#
+# This wrapper ensures git show output is truncated to reasonable limits
+
+set -euo pipefail
+
+# Default limits
+MAX_LINES=100
+MAX_FILES=20
+
+# Parse arguments
+COMMIT=""
+SHOW_STAT=false
+SHOW_FILE=""
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --stat)
+            SHOW_STAT=true
+            shift
+            ;;
+        --)
+            shift
+            SHOW_FILE="$1"
+            shift
+            ;;
+        *)
+            COMMIT="$1"
+            shift
+            ;;
+    esac
+done
+
+# If no commit specified, use HEAD
+if [ -z "$COMMIT" ]; then
+    COMMIT="HEAD"
+fi
+
+# Execute appropriate git command with limits
+if [ -n "$SHOW_FILE" ]; then
+    # Show changes for specific file only (safe)
+    git show "$COMMIT" -- "$SHOW_FILE" 2>&1 | head -n $MAX_LINES
+elif [ "$SHOW_STAT" = true ]; then
+    # Show stat with file limit
+    echo "=== Commit Info ==="
+    git log -1 --format="Commit: %H%nAuthor: %an <%ae>%nDate: %ad%nSubject: %s%n" "$COMMIT" 2>&1
+    echo ""
+    echo "=== Changed Files (limited to $MAX_FILES) ==="
+    git show --stat --format="" "$COMMIT" 2>&1 | head -n $MAX_FILES
+    echo ""
+    echo "Note: Output limited to $MAX_FILES files. Use 'git show $COMMIT -- <file>' for specific file changes."
+else
+    # Show commit message only (safest)
+    git log -1 --format=fuller "$COMMIT" 2>&1
+fi

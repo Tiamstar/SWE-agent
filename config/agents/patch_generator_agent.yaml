@@ -126,11 +126,12 @@ tools:
   execution_timeout: 120
 
 model:
-  name: openai/qwen-3-coder  # 使用openai前缀
-  per_instance_cost_limit: 5.0
+  name: openai/Qwen3-Coder
   api_base: https://www.sophnet.com/api/open-apis/v1
   api_key: $QWEN_API_KEY
-  temperature: 0.4
-  top_p: 0.9
+  per_instance_cost_limit: 5.0
+  temperature: 0.2
+  top_p: 0.95
+  litellm_model_registry: config/qwen3_coder_costs.json
 
 max_requeries: 2

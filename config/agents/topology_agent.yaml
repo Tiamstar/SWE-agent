@@ -83,6 +83,16 @@ templates:
       - cat <file> | head -n <lines>
       - ls -la <directory>
 
+    ⚠️ GIT COMMAND SAFETY RULES (CRITICAL):
+      ❌ NEVER use: git show <commit>                    # Returns entire commit (too large!)
+      ❌ AVOID: git log --grep=<pattern> (without -n)    # May return too many results
+      ✅ SAFE: git log --oneline -n 10                   # Limit to 10 commits
+      ✅ SAFE: git log --oneline --grep=<pattern> -n 20  # Limit grep results
+      ✅ SAFE: git show <commit> --stat                  # Get file list + stats only
+      ✅ SAFE: git show <commit> -- <specific_file>      # Get changes for ONE file only
+
+      💡 Always use -n flag to limit git log output! Default limit: 10-20 commits max.
+
     ═══════════════════════════════════════════════════════════════════════════════
     📤 REQUIRED OUTPUT FORMAT
     ═══════════════════════════════════════════════════════════════════════════════
@@ -160,11 +170,12 @@ tools:
   execution_timeout: 120
 
 model:
-  name: openai/qwen-3-coder  # 使用openai前缀
-  per_instance_cost_limit: 5.0
+  name: openai/Qwen3-Coder
   api_base: https://www.sophnet.com/api/open-apis/v1
   api_key: $QWEN_API_KEY
-  temperature: 0.2
-  top_p: 0.9
+  per_instance_cost_limit: 3.0
+  temperature: 0.0
+  top_p: 1.0
+  litellm_model_registry: config/qwen3_coder_costs.json
 
 max_requeries: 2
