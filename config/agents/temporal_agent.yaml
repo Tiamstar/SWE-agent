@@ -82,6 +82,18 @@ templates:
       - wc -l <file>                         # Count lines in file
       - diff <file1> <file2>                 # Compare files
 
+    ⚠️ GIT COMMAND SAFETY RULES (CRITICAL):
+      ❌ NEVER use: git show <commit>                    # Returns entire commit (too large!)
+      ❌ NEVER use: git show --stat                      # Can be huge for commits with many files!
+      ✅ SAFE: git log -1 --format=fuller <commit>       # Get commit message only
+      ✅ SAFE: git_safe_show <commit> --stat             # Get file list with automatic limits
+      ✅ SAFE: git_safe_show <commit> -- <specific_file> # Get changes for ONE file only
+      ✅ SAFE: git log --oneline -10                     # Get recent commit list
+      ✅ SAFE: git log --stat --oneline -5               # Recent commits with stats (limited)
+
+      💡 ALWAYS use git_safe_show instead of git show to prevent context window explosion!
+      💡 git_safe_show automatically limits output to 100 lines and 20 files
+
     ═══════════════════════════════════════════════════════════════════════════════
     📤 REQUIRED OUTPUT FORMAT
     ═══════════════════════════════════════════════════════════════════════════════
@@ -156,11 +168,12 @@ tools:
   execution_timeout: 120
 
 model:
-  name: openai/qwen-3-coder  # 使用openai前缀
-  per_instance_cost_limit: 5.0
+  name: openai/Qwen3-Coder
   api_base: https://www.sophnet.com/api/open-apis/v1
   api_key: $QWEN_API_KEY
-  temperature: 0.4
-  top_p: 0.9
+  per_instance_cost_limit: 3.0
+  temperature: 0.0
+  top_p: 1.0
+  litellm_model_registry: config/qwen3_coder_costs.json
 
 max_requeries: 2

@@ -4,15 +4,19 @@ This module implements the state-machine-based coordinator for HarmonyOS
 repository-level warning repair. The coordinator orchestrates multiple
 specialized agents following a defined workflow.
 
-Workflow Stages:
-    INITIALIZED -> ANALYSIS_TOPOLOGY -> ANALYSIS_HISTORY ->
-    PATCH_GENERATION -> VERIFICATION -> FINALIZING -> FINISHED
+Modes:
+    1. AUTO-DISCOVERY: Scan repo -> Select warning -> Fix
+       WARNING_DISCOVERY -> WARNING_TRIAGE -> ANALYSIS_TOPOLOGY -> ... -> FINISHED
+
+    2. MANUAL: Direct issue -> Fix (original mode)
+       INITIALIZED -> ANALYSIS_TOPOLOGY -> ... -> FINISHED
 
 Key Features:
-    1. State Machine Logic: Deterministic stage transitions
-    2. Shared State Management: Single source of truth
-    3. Iterative Refinement: Retry loop for failed verifications
-    4. Structured Communication: JSON-based agent outputs
+    1. Dual-Mode Entry: Auto-discovery or manual issue specification
+    2. State Machine Logic: Deterministic stage transitions
+    3. Shared State Management: Single source of truth
+    4. Iterative Refinement: Retry loop for failed verifications
+    5. Structured Communication: JSON-based agent outputs
 """
 
 from __future__ import annotations
@@ -41,8 +45,10 @@ from .shared_state import (
     SharedState,
     TopologyInsight,
     VerificationInsight,
+    WarningItem,
     WorkflowStage,
 )
+from .warning_scanner import WarningScanner
 
 logger = get_logger("harmony-coordinator", emoji="🎯")
 
@@ -58,15 +64,23 @@ class HarmonyCoordinator:
         - State Machine: Explicit stage transitions with validation
         - Shared State: All agents communicate through SharedState object
         - Iterative Refinement: Failed patches trigger re-generation
+        - Dual-Mode Operation: Auto-discovery or manual specification
 
-    Workflow:
+    Workflow (Auto-Discovery Mode):
         1. INITIALIZED: Set up shared environment
-        2. ANALYSIS_TOPOLOGY: Analyze code structure and dependencies
-        3. ANALYSIS_HISTORY: Analyze git history and change patterns
-        4. PATCH_GENERATION: Generate 1-3 candidate patches
-        5. VERIFICATION: Verify patches (build + contract check)
-        6. FINALIZING: Select best patch and prepare final output
-        7. FINISHED: Workflow complete
+        2. WARNING_DISCOVERY: cppcheck scan to find all warnings
+        3. WARNING_TRIAGE: LLM selects most critical warning
+        4. ANALYSIS_TOPOLOGY: Analyze code structure (for selected warning)
+        5. ANALYSIS_HISTORY: Analyze git history
+        6. PATCH_GENERATION: Generate 1-3 candidate patches
+        7. VERIFICATION: Verify patches (static + contract check)
+        8. FINALIZING: Select best patch and prepare final output
+        9. FINISHED: Workflow complete
+
+    Workflow (Manual Mode):
+        1. INITIALIZED: Set up shared environment
+        2. ANALYSIS_TOPOLOGY: Analyze code structure (for given issue)
+        3-8: Same as auto-discovery mode steps 5-9
     """
 
     def __init__(
@@ -134,6 +148,45 @@ class HarmonyCoordinator:
         logger.info(f"  Max iterations: {max_iterations}")
         logger.info(f"  Candidate patches per iteration: {num_candidate_patches}")
         logger.info("=" * 70)
+
+        # Initialize LLM client for warning triage (reuse patch generator model config)
+        # Handle environment variable expansion for API key
+        api_key = patch_generator_config.model.api_key
+
+        # Convert SecretStr to string if needed (pydantic uses SecretStr for security)
+        if api_key is not None:
+            # Check if it's a SecretStr object (has get_secret_value method)
+            if hasattr(api_key, 'get_secret_value'):
+                api_key = api_key.get_secret_value()
+            else:
+                api_key = str(api_key)
+
+            # Expand environment variable if needed
+            if api_key.startswith("$"):
+                env_var_name = api_key[1:]  # Remove $ prefix
+                api_key = os.getenv(env_var_name)
+                if not api_key:
+                    logger.warning(f"Environment variable {env_var_name} not set, triage LLM may not work")
+
+        # Similarly handle api_base if it's a special type
+        api_base = patch_generator_config.model.api_base
+        if api_base is not None and hasattr(api_base, 'get_secret_value'):
+            api_base = api_base.get_secret_value()
+        elif api_base is not None:
+            api_base = str(api_base)
+
+        self.triage_llm_config = {
+            "model": patch_generator_config.model.name,
+            "api_base": api_base,
+            "api_key": api_key,
+            "temperature": 0.0,  # Deterministic selection
+        }
+
+        # Log triage LLM configuration (without exposing full API key)
+        logger.debug(f"Triage LLM config:")
+        logger.debug(f"  model: {self.triage_llm_config['model']}")
+        logger.debug(f"  api_base: {self.triage_llm_config['api_base']}")
+        logger.debug(f"  api_key: {'SET' if self.triage_llm_config['api_key'] else 'NOT SET'}")
 
     def _load_coordinator_config(self, config_path: Path | None) -> dict[str, Any]:
         """Load coordinator configuration from YAML file.
@@ -302,10 +355,86 @@ class HarmonyCoordinator:
             except Exception as e:
                 logger.warning(f"Failed to close env: {e}")
 
+    def run_auto_discovery(
+        self,
+        source_dirs: list[str] | None = None,
+        max_warnings: int = 500,
+        task_id: str | None = None,
+    ) -> str:
+        """Execute auto-discovery mode: scan repo -> select warning -> fix.
+
+        This method implements the auto-discovery workflow:
+        1. WARNING_DISCOVERY: cppcheck scan
+        2. WARNING_TRIAGE: LLM selects most critical warning
+        3-N: Standard repair workflow
+
+        Args:
+            source_dirs: Directories to scan (None = auto-detect)
+            max_warnings: Maximum warnings to collect from scan
+            task_id: Optional task identifier
+
+        Returns:
+            Final patch as string
+        """
+        # Initialize shared state
+        if task_id is None:
+            task_id = f"AUTODISCOVERY-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+
+        self.state = SharedState(
+            task_id=task_id,
+            initial_requirement="",  # Will be set after warning selection
+        )
+
+        logger.info("=" * 70)
+        logger.info(f"Starting Auto-Discovery Mode: {task_id}")
+        logger.info("=" * 70)
+
+        try:
+            # Initialize environment
+            self._initialize_environment()
+            self.state.update_stage(WorkflowStage.INITIALIZED)
+
+            # Mark this as auto-discovery mode
+            self.state.metadata["mode"] = "auto-discovery"
+            self.state.metadata["max_warnings"] = max_warnings
+            self.state.metadata["source_dirs"] = source_dirs or "auto-detect"
+
+            self._save_state()
+
+            # Transition to WARNING_DISCOVERY
+            self.state.update_stage(WorkflowStage.WARNING_DISCOVERY)
+
+            # Execute state machine (will go through WARNING_DISCOVERY -> WARNING_TRIAGE -> ...)
+            self._execute_state_machine()
+
+            # Extract final result
+            if self.state.final_patch:
+                logger.info("✓ Auto-discovery workflow completed successfully")
+                return self.state.final_patch.diff_content
+            else:
+                logger.warning("Workflow completed but no final patch generated")
+                return "ERROR: No final patch generated"
+
+        except Exception as e:
+            logger.exception(f"Auto-discovery workflow failed: {e}")
+            self.state.update_stage(WorkflowStage.ERROR)
+            self.state.metadata["error"] = str(e)
+            self._save_state()
+            return f"ERROR: {e}"
+
+        finally:
+            # Close environment
+            logger.info("Cleaning up environment")
+            try:
+                self.env.close()
+            except Exception as e:
+                logger.warning(f"Failed to close env: {e}")
+
     def _execute_state_machine(self) -> None:
         """Execute the state machine workflow.
 
         This is the core orchestration logic that transitions through stages.
+        Handles both auto-discovery and manual modes.
         """
         while self.state.current_stage != WorkflowStage.FINISHED:
             current = self.state.current_stage
@@ -316,6 +445,10 @@ class HarmonyCoordinator:
 
             if current == WorkflowStage.INITIALIZED:
                 self._stage_initialized()
+            elif current == WorkflowStage.WARNING_DISCOVERY:
+                self._stage_warning_discovery()
+            elif current == WorkflowStage.WARNING_TRIAGE:
+                self._stage_warning_triage()
             elif current == WorkflowStage.ANALYSIS_TOPOLOGY:
                 self._stage_topology_analysis()
             elif current == WorkflowStage.ANALYSIS_HISTORY:
@@ -338,8 +471,87 @@ class HarmonyCoordinator:
             self._save_state()
 
     def _stage_initialized(self) -> None:
-        """INITIALIZED stage: Transition to topology analysis."""
-        logger.info("Stage: INITIALIZED -> ANALYSIS_TOPOLOGY")
+        """INITIALIZED stage: Route to next stage based on mode."""
+        mode = self.state.metadata.get("mode", "manual")
+
+        if mode == "auto-discovery":
+            logger.info("Stage: INITIALIZED -> WARNING_DISCOVERY (auto-discovery mode)")
+            self.state.update_stage(WorkflowStage.WARNING_DISCOVERY)
+        else:
+            logger.info("Stage: INITIALIZED -> ANALYSIS_TOPOLOGY (manual mode)")
+            self.state.update_stage(WorkflowStage.ANALYSIS_TOPOLOGY)
+
+    def _stage_warning_discovery(self) -> None:
+        """WARNING_DISCOVERY stage: Execute cppcheck scan."""
+        logger.info("Running cppcheck repository scan...")
+
+        # Get scan parameters from metadata
+        source_dirs = self.state.metadata.get("source_dirs")
+        if source_dirs == "auto-detect":
+            source_dirs = None  # Let scanner auto-detect
+
+        max_warnings = self.state.metadata.get("max_warnings", 500)
+
+        # Create scanner and execute scan
+        scanner = WarningScanner(self.env)
+        warnings = scanner.scan_repository(
+            source_dirs=source_dirs,
+            max_warnings=max_warnings,
+        )
+
+        if not warnings:
+            logger.error("No warnings discovered, cannot proceed")
+            self.state.update_stage(WorkflowStage.ERROR)
+            self.state.metadata["error"] = "No warnings found by cppcheck scan"
+            return
+
+        # Save warnings to shared state
+        self.state.discovered_warnings = warnings
+        self.state.metadata["total_warnings_found"] = len(warnings)
+
+        logger.info(f"✓ Discovered {len(warnings)} warnings")
+        logger.info(f"  Top 5 warnings:")
+        for i, w in enumerate(warnings[:5], 1):
+            logger.info(f"    {i}. {w.file_path}:{w.line_number} [{w.severity}] {w.message[:60]}...")
+
+        # Transition to triage
+        self.state.update_stage(WorkflowStage.WARNING_TRIAGE)
+
+    def _stage_warning_triage(self) -> None:
+        """WARNING_TRIAGE stage: LLM selects most critical warning."""
+        logger.info("Analyzing warnings with LLM to select most critical one...")
+
+        if not self.state.discovered_warnings:
+            logger.error("No warnings available for triage")
+            self.state.update_stage(WorkflowStage.ERROR)
+            return
+
+        # Call LLM for triage
+        selected_warning = self._triage_warnings_with_llm(self.state.discovered_warnings)
+
+        if not selected_warning:
+            logger.error("LLM triage failed to select a warning")
+            self.state.update_stage(WorkflowStage.ERROR)
+            return
+
+        # Set selected warning in state
+        self.state.selected_warning = selected_warning
+
+        # Convert warning to issue description for downstream agents
+        self.state.initial_requirement = (
+            f"{selected_warning.file_path}:{selected_warning.line_number}: "
+            f"{selected_warning.severity}: {selected_warning.message}\n\n"
+            f"Priority Score: {selected_warning.priority_score:.2f}\n"
+            f"Selection Reason: {selected_warning.selection_reason}"
+        )
+
+        logger.info(f"✓ Selected warning: {selected_warning.id}")
+        logger.info(f"  File: {selected_warning.file_path}:{selected_warning.line_number}")
+        logger.info(f"  Message: {selected_warning.message}")
+        logger.info(f"  Priority: {selected_warning.priority_score:.2f}")
+        logger.info(f"  Reason: {selected_warning.selection_reason}")
+
+        # Transition to topology analysis for selected warning
         self.state.update_stage(WorkflowStage.ANALYSIS_TOPOLOGY)
 
     def _stage_topology_analysis(self) -> None:
@@ -429,40 +641,86 @@ class HarmonyCoordinator:
         self.state.update_stage(WorkflowStage.VERIFICATION)
 
     def _stage_verification_review(self) -> None:
-        """VERIFICATION stage: Verify patches with unified Verification agent."""
-        logger.info("Verifying candidate patches...")
+        """VERIFICATION stage: Batch verification of all patches.
 
-        # Verify each candidate patch
+        New design: Send ALL patches at once to verification agent, which will:
+        1. Evaluate all patches (interface checking, risk assessment)
+        2. Select the best patch based on quality and risk scores
+        3. Return the selected patch with comprehensive evaluation results
+
+        Note: This stage no longer validates if the warning is actually fixed.
+        That validation happens during testing (e.g., Defects4C validation).
+        """
+        logger.info("Verifying candidate patches (batch mode)...")
+
+        if not self.state.candidate_patches:
+            logger.error("No candidate patches to verify")
+            self.state.update_stage(WorkflowStage.ERROR)
+            return
+
+        # Mark all patches as IN_PROGRESS initially
         for patch in self.state.candidate_patches:
-            # Check if already verified (using new field or legacy field)
-            if patch.verification_status != "PENDING" or patch.build_status not in ["PENDING", ""]:
-                continue  # Already verified
+            if patch.verification_status == "PENDING":
+                patch.verification_status = "IN_PROGRESS"
 
-            logger.info(f"Verifying patch: {patch.id}")
+        # Run batch verification
+        batch_result = self._verify_patches_batch(self.state.candidate_patches)
 
-            # Run unified verification agent
-            verification_insight = self._verify_patch(patch)
+        if not batch_result:
+            logger.error("Batch verification failed, no result returned")
+            self.state.update_stage(WorkflowStage.ERROR)
+            return
 
-            # Update state with verification results
-            self.state.update_patch_verification(patch.id, verification_insight)
+        # Extract selected patch info from batch result
+        selected_patch_id = batch_result.get("selected_patch_id")
+        if not selected_patch_id:
+            logger.error("Batch verification did not select a patch")
+            self.state.update_stage(WorkflowStage.ERROR)
+            return
 
-            # Log results
-            if verification_insight.is_safe:
-                logger.info(f"✓ Patch {patch.id} is SAFE (quality: {verification_insight.quality_score:.2f}, risk: {verification_insight.risk_score:.2f})")
-            else:
-                logger.warning(f"✗ Patch {patch.id} is UNSAFE (quality: {verification_insight.quality_score:.2f}, risk: {verification_insight.risk_score:.2f})")
+        # Update all patches with their evaluation scores
+        evaluation_results = batch_result.get("evaluation_results", [])
+        for eval_result in evaluation_results:
+            patch_id = eval_result.get("patch_id")
+            for patch in self.state.candidate_patches:
+                if patch.id == patch_id:
+                    # Update scores from evaluation
+                    patch.quality_score = eval_result.get("quality_score", 0.7)
+                    patch.risk_score = eval_result.get("risk_score", 0.5)
+                    patch.overall_score = eval_result.get("overall_score", 0.6)
 
-        # Check if any patches are safe
-        safe_patches = [p for p in self.state.candidate_patches if p.verification_status == "SAFE" or p.review_status == "SAFE"]
+                    # If this is the selected patch, mark as SAFE (quality-based selection)
+                    if patch_id == selected_patch_id:
+                        patch.verification_status = "SAFE"
+                        patch.verification_errors = ""
+                        logger.info(f"✓ Patch {patch_id} SELECTED (quality: {patch.quality_score:.2f}, risk: {patch.risk_score:.2f}, overall: {patch.overall_score:.2f})")
+                    else:
+                        # Non-selected patches remain as evaluated but not selected
+                        patch.verification_status = "EVALUATED"
 
-        if safe_patches:
-            logger.info(f"✓ Found {len(safe_patches)} safe patch(es)")
-            self.state.update_stage(WorkflowStage.FINALIZING)
-        else:
-            logger.warning("No safe patches found, preparing for retry...")
-            # Prepare for retry and go back to PATCH_GENERATION
-            self.state.prepare_for_retry()
-            self.state.update_stage(WorkflowStage.PATCH_GENERATION)
+                    patch.last_updated_by = "Verification Agent (Batch)"
+
+        # Create comprehensive VerificationInsight for the selected patch
+        selected_insight = VerificationInsight(
+            patch_id=selected_patch_id,
+            is_safe=batch_result.get("is_safe", True),  # Default to True since we're doing quality assessment
+            quality_score=batch_result.get("quality_score", 0.0),
+            risk_score=batch_result.get("risk_score", 1.0),
+            overall_score=batch_result.get("overall_score", 0.0),
+            static_analysis={
+                "evaluation_results": evaluation_results,
+                "selected_patch_id": selected_patch_id,
+            },
+            contract_check={},  # No validation phase anymore
+            recommendation=batch_result.get("recommendation", ""),
+        )
+
+        # Update the selected patch with the verification insight
+        self.state.update_patch_verification(selected_patch_id, selected_insight)
+
+        # Always proceed to finalization (no validation retry loop)
+        logger.info(f"✓ Quality assessment complete, selected patch: {selected_patch_id}")
+        self.state.update_stage(WorkflowStage.FINALIZING)
 
     def _stage_finalizing(self) -> None:
         """FINALIZING stage: Select best patch and finalize."""
@@ -475,10 +733,10 @@ class HarmonyCoordinator:
                 id="patch_final",
                 diff_content=best_patch.diff_content,
                 description=f"Selected from candidate {best_patch.id}",
-                verification_summary=f"Build: {best_patch.build_status}, Review: {best_patch.review_status}, Risk: {best_patch.review_risk_score}",
+                verification_summary=f"Status: {best_patch.verification_status}, Overall Score: {best_patch.overall_score}, Risk: {best_patch.risk_score}",
             )
             self.state.set_final_patch(final)
-            logger.info(f"✓ Final patch selected: {best_patch.id} (risk: {best_patch.review_risk_score})")
+            logger.info(f"✓ Final patch selected: {best_patch.id} (overall score: {best_patch.overall_score}, risk: {best_patch.risk_score})")
         else:
             logger.warning("No suitable candidate found, using fallback")
             final = FinalPatch(
@@ -598,6 +856,139 @@ class HarmonyCoordinator:
                 f"✗ {agent_name} agent failed after {elapsed_time:.1f}s: {e}"
             )
             raise
+
+    def _triage_warnings_with_llm(self, warnings: list[WarningItem]) -> WarningItem | None:
+        """Use LLM to select the most critical warning from the list.
+
+        Args:
+            warnings: List of WarningItem objects
+
+        Returns:
+            Selected WarningItem with priority_score and selection_reason filled
+        """
+        if not warnings:
+            logger.error("No warnings provided for triage")
+            return None
+
+        # Build triage prompt
+        warnings_summary = []
+        for w in warnings[:100]:  # Limit to top 100 to avoid token limits
+            warnings_summary.append({
+                "id": w.id,
+                "file": w.file_path,
+                "line": w.line_number,
+                "severity": w.severity,
+                "message": w.message,
+            })
+
+        prompt = f"""Analyze these cppcheck warnings and select THE MOST CRITICAL ONE for immediate repair.
+
+Total warnings found: {len(warnings)}
+Showing top {min(100, len(warnings))} warnings:
+
+{json.dumps(warnings_summary, indent=2)}
+
+Your task:
+1. Evaluate each warning based on:
+   - Safety impact (crashes, data corruption, security)
+   - File criticality (core modules > utilities > tests)
+   - Repairability (clear fix vs complex refactoring)
+   - Impact scope (frequently called vs rarely used)
+
+2. Select exactly ONE warning that should be fixed first
+
+3. Return JSON in this format:
+{{
+  "selected_warning_id": "warning_042",
+  "priority_score": 0.95,
+  "selection_reason": "Brief explanation why this is most critical (1-2 sentences)"
+}}
+
+Return ONLY the JSON, no other text."""
+
+        # Call LLM API using litellm
+        try:
+            import litellm
+
+            logger.info(f"Calling LLM for warning triage (model: {self.triage_llm_config['model']})")
+            logger.debug(f"Triage prompt length: {len(prompt)} chars, warnings count: {len(warnings_summary)}")
+
+            # Build litellm arguments (only include non-None values)
+            llm_args = {
+                "model": self.triage_llm_config["model"],
+                "messages": [
+                    {"role": "system", "content": "You are an expert C/C++ code analyzer specializing in prioritizing bug fixes."},
+                    {"role": "user", "content": prompt},
+                ],
+                "temperature": self.triage_llm_config.get("temperature", 0.0),
+            }
+
+            # Only add api_base and api_key if they are not None
+            # This allows litellm to use environment variables when config values are None
+            if self.triage_llm_config.get("api_base"):
+                llm_args["api_base"] = self.triage_llm_config["api_base"]
+                logger.debug(f"Using api_base: {self.triage_llm_config['api_base']}")
+
+            if self.triage_llm_config.get("api_key"):
+                llm_args["api_key"] = self.triage_llm_config["api_key"]
+                logger.debug("Using api_key from config")
+            else:
+                logger.debug("No api_key in config, litellm will use environment variables")
+
+            response = litellm.completion(**llm_args)
+
+            # Parse LLM response
+            content = response.choices[0].message.content.strip()
+            logger.info(f"LLM triage response received ({len(content)} chars)")
+            logger.debug(f"LLM triage raw response: {content}")
+
+            # Extract JSON from response
+            json_match = re.search(r'\{[\s\S]*\}', content)
+            if not json_match:
+                logger.error(f"LLM response does not contain valid JSON. Response: {content[:200]}")
+                raise ValueError("No JSON found in LLM response")
+
+            result = json.loads(json_match.group())
+            logger.debug(f"Parsed JSON result: {result}")
+
+            # Find the selected warning
+            selected_id = result.get("selected_warning_id")
+            if not selected_id:
+                logger.error(f"LLM response missing 'selected_warning_id'. Result: {result}")
+                raise ValueError("Missing selected_warning_id in LLM response")
+
+            for warning in warnings:
+                if warning.id == selected_id:
+                    # Update warning with LLM-provided metadata
+                    warning.priority_score = result.get("priority_score", 0.5)
+                    warning.selection_reason = result.get("selection_reason", "Selected by LLM")
+                    logger.info(f"✅ LLM selected warning: {selected_id} (score: {warning.priority_score})")
+                    logger.info(f"   Reason: {warning.selection_reason}")
+                    return warning
+
+            logger.error(f"Selected warning ID '{selected_id}' not found in warnings list")
+            logger.debug(f"Available warning IDs: {[w.id for w in warnings[:10]]}")
+            raise ValueError(f"Selected warning ID '{selected_id}' not found")
+
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse JSON from LLM response: {e}")
+            logger.debug(f"Invalid JSON content: {json_match.group() if json_match else 'No match'}")
+        except Exception as e:
+            logger.error(f"LLM triage failed with exception: {type(e).__name__}: {e}")
+            import traceback
+            logger.debug(f"Full traceback:\n{traceback.format_exc()}")
+
+        # Fallback: select first warning if LLM fails
+        logger.warning("⚠️ Falling back to first warning in list (LLM triage failed)")
+        if not warnings:
+            logger.error("No warnings available for fallback")
+            return None
+
+        first_warning = warnings[0]
+        first_warning.priority_score = 0.5
+        first_warning.selection_reason = f"LLM triage failed ({type(e).__name__}), using first warning as fallback"
+        logger.info(f"Fallback warning: {first_warning.id} ({first_warning.file_path}:{first_warning.line_number})")
+        return first_warning
 
     def _build_topology_prompt(self) -> str:
         """Build prompt for Topology Agent."""
@@ -1067,83 +1458,214 @@ index 0000000..1111111 100644
 // PatchGeneratorAgent failed, placeholder created
 """
 
-    def _verify_patch(self, patch: CandidatePatch) -> VerificationInsight:
-        """Verify patch with unified Verification Agent.
+    def _verify_patches_batch(self, patches: list[CandidatePatch]) -> dict[str, Any]:
+        """Batch verification of all candidate patches.
+
+        This method sends all patches to the verification agent at once,
+        which will:
+        1. Evaluate all patches (interface check + risk assessment)
+        2. Select the best patch based on quality and risk scores
+        3. Return comprehensive results
+
+        Note: This method no longer validates if the warning is actually fixed.
+        That validation happens during testing (e.g., Defects4C validation).
 
         Args:
-            patch: Candidate patch to verify
+            patches: List of candidate patches to verify
 
         Returns:
-            VerificationInsight with combined static analysis and contract check results
+            Dictionary with batch verification results:
+            {
+                "evaluation_results": [...],
+                "selected_patch_id": "patch_1",
+                "is_safe": true,
+                "quality_score": 0.85,
+                "risk_score": 0.35,
+                "overall_score": 0.77,
+                "recommendation": "..."
+            }
         """
-        logger.info(f"Running unified verification on {patch.id}...")
+        logger.info(f"Running batch verification on {len(patches)} patches...")
 
-        # Check if this is a placeholder patch
-        if "PatchGeneratorAgent failed, placeholder created" in patch.diff_content:
-            logger.warning(f"Skipping verification for placeholder patch {patch.id}")
-            return VerificationInsight(
-                patch_id=patch.id,
-                is_safe=False,
-                quality_score=0.0,
-                risk_score=1.0,
-                overall_score=0.0,
-                static_analysis={"status": "CHECK_SKIPPED", "tool_used": "none"},
-                contract_check={"api_changes_detected": False, "violation_list": []},
-                recommendation="Placeholder patch cannot be verified",
-            )
+        # Build warning context from initial requirement
+        warning_context = self._build_warning_context()
 
-        # Build prompt for Verification Agent
-        prompt = f"""Candidate Patch to Verify:
+        # Get topology and temporal insights
+        topology_insights = json.dumps(self.state.context_insights.get("topology", {}), indent=2)
+        temporal_insights = json.dumps(self.state.context_insights.get("history", {}), indent=2)
 
-{patch.diff_content}
+        # Format all patches for the prompt
+        all_patches_text = self._format_patches_for_verification(patches)
 
-Perform comprehensive verification (static analysis + contract check).
+        # Build prompt using template variables
+        prompt = f"""
+═══════════════════════════════════════════════════════════════════
+ORIGINAL WARNING CONTEXT
+═══════════════════════════════════════════════════════════════════
+{warning_context}
+
+═══════════════════════════════════════════════════════════════════
+TOPOLOGY ANALYSIS (from TopologyAgent)
+═══════════════════════════════════════════════════════════════════
+{topology_insights}
+
+═══════════════════════════════════════════════════════════════════
+TEMPORAL ANALYSIS (from TemporalAgent)
+═══════════════════════════════════════════════════════════════════
+{temporal_insights}
+
+═══════════════════════════════════════════════════════════════════
+CANDIDATE PATCHES TO EVALUATE
+═══════════════════════════════════════════════════════════════════
+{all_patches_text}
+
+═══════════════════════════════════════════════════════════════════
+YOUR TASK
+═══════════════════════════════════════════════════════════════════
+1. PHASE 1: Evaluate ALL candidate patches above
+   - Check interface constraints (verify_func_signature, find_upstream_callers)
+   - Check type consistency (cppcheck)
+   - Assess propagation risk (use provided topology/temporal context)
+
+2. PHASE 2: Select the BEST patch based on scores
+   - Rank by overall_score (quality + risk)
+   - Return comprehensive evaluation results
+
+Remember: After return_result succeeds (you see <<MAS_AGENT_RESULT>> markers),
+your task is COMPLETE. DO NOT call submit or any other commands.
 """
 
         try:
-            # Run Verification Agent
+            # Run Verification Agent with batch-specific output directory
             result = self._run_agent(
                 config=self.verification_config,
-                agent_name="verification",
+                agent_name="verification_batch",
                 problem_statement=prompt,
+                timeout_seconds=240,  # 4 minutes for batch processing (no validation)
             )
 
-            # Extract VerificationInsight from result
-            submission = result.info.get("submission") or ""
+            # Extract batch results from MAS result markers
+            mas_result = self._extract_mas_result(result)
+            submission = mas_result if mas_result else result.info.get("submission") or ""
 
-            # Try to parse JSON
+            # Parse JSON result
             json_match = re.search(r'\{[\s\S]*\}', submission)
             if json_match:
                 try:
-                    data = json.loads(json_match.group())
-                    return VerificationInsight.from_dict(data)
-                except json.JSONDecodeError:
-                    logger.warning("Failed to parse JSON from verification agent")
+                    batch_result = json.loads(json_match.group())
+                    logger.info(f"✓ Batch verification completed")
+                    logger.info(f"  Selected: {batch_result.get('selected_patch_id')}")
+                    logger.info(f"  Quality: {batch_result.get('quality_score', 0.0):.2f}, Risk: {batch_result.get('risk_score', 0.0):.2f}")
+                    return batch_result
+                except json.JSONDecodeError as e:
+                    logger.error(f"Failed to parse batch verification JSON: {e}")
 
-            # Fallback: assume safe with medium confidence
-            return VerificationInsight(
-                patch_id=patch.id,
-                is_safe=True,
-                quality_score=0.7,
-                risk_score=0.3,
-                overall_score=0.7,
-                static_analysis={"status": "CHECK_SKIPPED", "tool_used": "none"},
-                contract_check={"api_changes_detected": False, "violation_list": []},
-                recommendation="Verification agent did not return structured output, assuming safe",
-            )
+            # Fallback: return safe default for best-scored patch
+            logger.warning("Batch verification did not return valid JSON, using fallback")
+            best_patch = max(patches, key=lambda p: p.overall_score if p.overall_score else 0.0)
+            return {
+                "evaluation_results": [{"patch_id": p.id, "overall_score": 0.7} for p in patches],
+                "selected_patch_id": best_patch.id,
+                "is_safe": True,
+                "quality_score": 0.7,
+                "risk_score": 0.5,
+                "overall_score": 0.6,
+                "recommendation": "Verification agent failed to return structured output. Using fallback selection.",
+            }
 
         except Exception as e:
-            logger.error(f"Verification agent failed: {e}")
-            return VerificationInsight(
-                patch_id=patch.id,
-                is_safe=True,
-                quality_score=0.5,
-                risk_score=0.5,
-                overall_score=0.5,
-                static_analysis={"status": "CHECK_SKIPPED", "tool_used": "none"},
-                contract_check={"api_changes_detected": False, "violation_list": []},
-                recommendation=f"Verification agent error: {str(e)}, assuming safe",
-            )
+            logger.error(f"Batch verification failed: {e}")
+            # Return error result
+            return {
+                "evaluation_results": [],
+                "selected_patch_id": patches[0].id if patches else "unknown",
+                "is_safe": False,
+                "quality_score": 0.0,
+                "risk_score": 1.0,
+                "overall_score": 0.0,
+                "recommendation": f"Batch verification error: {str(e)}",
+            }
+
+    def _build_warning_context(self) -> str:
+        """Build warning context string from state.
+
+        Returns:
+            Formatted warning context string
+        """
+        # Try to parse warning info from initial_requirement
+        initial_req = self.state.initial_requirement
+
+        # If we have a selected_warning, use that
+        if self.state.selected_warning:
+            return f"""File: {self.state.selected_warning.file_path}
+Line: {self.state.selected_warning.line_number}
+Severity: {self.state.selected_warning.severity}
+Message: {self.state.selected_warning.message}
+Warning ID: {self._extract_warning_id(self.state.selected_warning.message)}"""
+
+        # Otherwise, try to parse from initial_requirement
+        # Format: "file.c:123: severity: message"
+        match = re.match(r'(.+?):(\d+):\s*(\w+):\s*(.+)', initial_req.split('\n')[0])
+        if match:
+            file_path, line_num, severity, message = match.groups()
+            warning_id = self._extract_warning_id(message)
+            return f"""File: {file_path}
+Line: {line_num}
+Severity: {severity}
+Message: {message}
+Warning ID: {warning_id}"""
+
+        # Fallback: return raw requirement
+        return f"""Original Warning:
+{initial_req}"""
+
+    def _extract_warning_id(self, message: str) -> str:
+        """Extract warning ID from cppcheck message.
+
+        Args:
+            message: Warning message string
+
+        Returns:
+            Warning ID (e.g., "nullPointer", "uninitvar") or "unknown"
+        """
+        # Common cppcheck warning IDs
+        common_ids = [
+            "nullPointer", "uninitvar", "memleakOnRealloc", "memleak",
+            "resourceLeak", "arrayIndexOutOfBounds", "bufferAccessOutOfBounds",
+            "invalidFunctionArg", "invalidPointerCast", "missingReturn",
+            "deallocDealloc", "doubleFree", "unusedVariable", "unreadVariable"
+        ]
+
+        for wid in common_ids:
+            if wid.lower() in message.lower():
+                return wid
+
+        # Try to find pattern like [warningId]
+        match = re.search(r'\[(\w+)\]', message)
+        if match:
+            return match.group(1)
+
+        return "unknown"
+
+    def _format_patches_for_verification(self, patches: list[CandidatePatch]) -> str:
+        """Format patches for batch verification prompt.
+
+        Args:
+            patches: List of candidate patches
+
+        Returns:
+            Formatted string with all patches
+        """
+        formatted = []
+        for i, patch in enumerate(patches, 1):
+            formatted.append(f"""
+─────────────────────────────────────────────────────────────────
+PATCH {i}: {patch.id}
+─────────────────────────────────────────────────────────────────
+{patch.diff_content}
+""")
+
+        return "\n".join(formatted)
 
     def _extract_topology_insight(self, result: AgentRunResult) -> TopologyInsight:
         """Extract structured TopologyInsight from agent result.

@@ -80,37 +80,83 @@ PATCH_GENERATION → VERIFICATION_REVIEW → FINALIZING → FINISHED
 
 **输出**: JSON格式的HistoryInsight
 
-#### 2.3 构建验证Agent (`config/agents/review_agent.yaml`)
+#### 2.3 综合验证Agent (`config/agents/verification_agent.yaml`)
 
 **职责**:
-- 应用候选补丁
-- 编译验证
-- 基本语法检查
+- 批量评估所有候选补丁
+- 评估代码质量和变更风险
+- 选择最优补丁并返回评估结果
 
-**支持的构建系统**:
-- HarmonyOS (GN + Ninja)
-- CMake
-- Make
-- Autotools
-- 直接编译器调用
+**三阶段工作流**:
 
-**输出**: JSON格式的ReviewInsight
+**PHASE 1: 批量评估**（对所有补丁）
+- 对每个补丁执行三个检查步骤：
+  1. **接口约束与类型一致性检查**
+     - 提取补丁修改的函数
+     - 验证函数签名完整性（`verify_func_signature`）
+     - 检查调用者影响（`find_upstream_callers`）
+     - **运行cppcheck进行静态类型检查**
+     - 计算 `interface_safety_score` (0.0-1.0)
 
-#### 2.4 契约与影响Agent (`config/agents/contract_agent.yaml`)
+  2. **变更传播风险评估**（基于拓扑和时序分析结果）
+     - 模块关键性评估（核心/框架/工具）
+     - 依赖复杂度评估
+     - 历史协同变更影响
+     - 补丁修改范围
+     - 计算 `propagation_risk_score` (0.0-1.0)
 
-**职责**:
-- API契约验证（函数签名、ABI兼容性）
-- 副作用分析（内存安全、并发问题）
-- 风险评分（0.0-1.0）
+  3. **综合评分计算**
+     - `quality_score` = interface_safety_score
+     - `risk_score` = propagation_risk_score
+     - `overall_score` = 0.6 × quality_score + 0.4 × (1.0 - risk_score)
 
-**检查项**:
-- ABI_BREAK: 函数签名变更
-- MEMORY_LEAK: 内存泄漏
-- NULL_DEREF: 空指针解引用
-- DATA_RACE: 数据竞争
-- BUFFER_OVERFLOW: 缓冲区溢出
+**PHASE 2: 补丁选择**
+- 按评分排序：最高overall_score优先
+- 并列时按最低propagation_risk_score为次要条件
+- 返回最优补丁的评估结果
 
-**输出**: JSON格式的ContractInsight
+**特性**:
+- **批量处理**: 一次性评估1-N个候选补丁
+- **多维度评估**: 类型安全 + 变更风险 + 历史影响
+- **智能降级**: 工具失败时使用启发式方法
+- **高效工具调用**: 1-2个补丁需5-8次调用，3-5个需12-20次调用
+- **完整上下文利用**: 综合拓扑和时序分析结果进行评估
+
+**输出JSON格式**:
+```json
+{
+  "insight_type": "verification",
+  "evaluation_results": [
+    {
+      "patch_id": "patch_1",
+      "interface_check": {
+        "modified_functions": ["foo", "bar"],
+        "signature_changes": true,
+        "upstream_callers_count": 3,
+        "type_errors": [],
+        "safety_score": 0.85
+      },
+      "propagation_risk_assessment": {
+        "module_criticality": "framework",
+        "dependency_complexity_score": 0.2,
+        "historical_cochange_risk": 0.15,
+        "total_risk_score": 0.35
+      },
+      "quality_score": 0.85,
+      "risk_score": 0.35,
+      "overall_score": 0.77
+    }
+  ],
+  "selected_patch_id": "patch_1",
+  "selection_reason": "Highest overall_score (0.77), acceptable risk (0.35)",
+  "is_safe": true,
+  "overall_score": 0.77,
+  "recommendation": "Patch patch_1 is recommended..."
+}
+```
+
+**输出**: JSON格式的VerificationInsight，包含完整的评估结果和最优补丁选择
+
 
 ### 3. 运行脚本和工具 ✅
 

@@ -14,11 +14,17 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
+from sweagent.utils.log import get_logger
+
+logger = get_logger("harmony-shared-state", emoji="📊")
+
 
 class WorkflowStage(str, Enum):
     """Workflow stages for the Harmony MAS state machine."""
 
     INITIALIZED = "INITIALIZED"
+    WARNING_DISCOVERY = "WARNING_DISCOVERY"  # cppcheck scan for all warnings
+    WARNING_TRIAGE = "WARNING_TRIAGE"  # LLM selects most important warning
     ANALYSIS_TOPOLOGY = "ANALYSIS_TOPOLOGY"
     ANALYSIS_HISTORY = "ANALYSIS_HISTORY"
     PATCH_GENERATION = "PATCH_GENERATION"  # Unified state (handles both initial and retry)
@@ -26,6 +32,29 @@ class WorkflowStage(str, Enum):
     FINALIZING = "FINALIZING"
     FINISHED = "FINISHED"
     ERROR = "ERROR"
+
+
+@dataclass
+class WarningItem:
+    """Single cppcheck warning record."""
+
+    id: str  # warning_001, warning_002, ...
+    file_path: str  # src/foo.c
+    line_number: int  # 142
+    severity: str  # warning, error, performance, style
+    message: str  # "Potential null pointer dereference"
+    raw_output: str  # Original cppcheck output line
+    priority_score: float = 0.0  # LLM-assigned priority (0.0-1.0)
+    selection_reason: str = ""  # Why LLM selected this warning
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dictionary."""
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> WarningItem:
+        """Create from dictionary."""
+        return cls(**data)
 
 
 @dataclass
@@ -151,32 +180,28 @@ class CandidatePatch:
     last_updated_by: str = "Coordinator"
     verification_insight: VerificationInsight | None = None
 
-    # Legacy fields (for backward compatibility)
-    build_status: str = "PENDING"
+    # Legacy fields (deprecated but kept for backward compatibility with old code)
     review_status: str = "PENDING"
-    build_errors: str = ""
     review_risk_score: float | None = None
-    contract_insight: ContractInsight | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary."""
         data = asdict(self)
         if self.verification_insight:
             data["verification_insight"] = self.verification_insight.to_dict()
-        if self.contract_insight:
-            data["contract_insight"] = self.contract_insight.to_dict()
         return data
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> CandidatePatch:
         """Create from dictionary."""
         verification_data = data.pop("verification_insight", None)
-        contract_data = data.pop("contract_insight", None)
+        # Remove obsolete fields if present
+        data.pop("contract_insight", None)
+        data.pop("build_status", None)
+        data.pop("build_errors", None)
         patch = cls(**data)
         if verification_data:
             patch.verification_insight = VerificationInsight.from_dict(verification_data)
-        if contract_data:
-            patch.contract_insight = ContractInsight.from_dict(contract_data)
         return patch
 
 
@@ -211,6 +236,8 @@ class SharedState:
         task_id: Unique identifier for this repair task
         current_stage: Current workflow stage (state machine position)
         initial_requirement: Original warning/issue description
+        discovered_warnings: All warnings found by cppcheck scan
+        selected_warning: The single warning chosen for repair (by LLM)
         context_insights: Structured insights from analysis agents
         candidate_patches: List of generated patch candidates
         final_patch: The approved final patch
@@ -221,6 +248,8 @@ class SharedState:
     task_id: str
     current_stage: WorkflowStage = WorkflowStage.INITIALIZED
     initial_requirement: str = ""
+    discovered_warnings: list[WarningItem] = field(default_factory=list)
+    selected_warning: WarningItem | None = None
     context_insights: dict[str, Any] = field(default_factory=dict)
     candidate_patches: list[CandidatePatch] = field(default_factory=list)
     final_patch: FinalPatch | None = None
@@ -273,18 +302,17 @@ class SharedState:
     def update_patch_build_status(self, patch_id: str, status: str, errors: str = "") -> None:
         """Update build status for a candidate patch (DEPRECATED - use update_patch_verification).
 
+        This method is deprecated and kept only for backward compatibility.
+
         Args:
             patch_id: Patch identifier
             status: Build status (COMPILE_SUCCESS, COMPILE_FAILED, etc.)
             errors: Error messages if failed
         """
-        for patch in self.candidate_patches:
-            if patch.id == patch_id:
-                patch.build_status = status
-                patch.build_errors = errors
-                patch.last_updated_by = "Review Agent"
-                self.metadata["last_updated"] = datetime.now().isoformat()
-                break
+        logger.warning("update_patch_build_status is deprecated, use update_patch_verification instead")
+        # This method is deprecated but we keep it for backward compatibility
+        # It now does nothing since build_status field was removed
+        self.metadata["last_updated"] = datetime.now().isoformat()
 
     def update_patch_review_status(
         self,
@@ -293,15 +321,19 @@ class SharedState:
     ) -> None:
         """Update review status for a candidate patch (DEPRECATED - use update_patch_verification).
 
+        This method is deprecated and kept only for backward compatibility.
+
         Args:
             patch_id: Patch identifier
             contract_insight: ContractInsight from Contract Agent
         """
+        logger.warning("update_patch_review_status is deprecated, use update_patch_verification instead")
+        # This method is deprecated but we keep it for backward compatibility
+        # Map old contract_insight to new verification_insight
         for patch in self.candidate_patches:
             if patch.id == patch_id:
                 patch.review_status = "SAFE" if contract_insight.is_safe else "UNSAFE"
                 patch.review_risk_score = contract_insight.risk_score
-                patch.contract_insight = contract_insight
                 patch.last_updated_by = "Contract Agent"
                 self.metadata["last_updated"] = datetime.now().isoformat()
                 break
@@ -354,8 +386,8 @@ class SharedState:
             # Check new field first
             if p.verification_status == "SAFE":
                 safe_patches.append(p)
-            # Fallback to legacy fields
-            elif p.review_status == "SAFE" and p.build_status in ["COMPILE_SUCCESS", "CHECK_SUCCESS"]:
+            # Fallback to legacy review_status field
+            elif p.review_status == "SAFE":
                 safe_patches.append(p)
 
         if safe_patches:
@@ -390,10 +422,12 @@ class SharedState:
             "violations": [],
         }
 
-        # Collect violations from all failed patches
+        # Collect violations from all failed patches using verification_insight
         for patch in self.candidate_patches:
-            if patch.contract_insight and patch.contract_insight.violation_list:
-                retry_record["violations"].extend(patch.contract_insight.violation_list)
+            if patch.verification_insight and patch.verification_insight.contract_check:
+                violation_list = patch.verification_insight.contract_check.get("violation_list", [])
+                if violation_list:
+                    retry_record["violations"].extend(violation_list)
 
         self.retry_history.append(retry_record)
 
@@ -433,6 +467,8 @@ class SharedState:
             "task_id": self.task_id,
             "current_stage": self.current_stage.value,
             "initial_requirement": self.initial_requirement,
+            "discovered_warnings": [w.to_dict() for w in self.discovered_warnings],
+            "selected_warning": self.selected_warning.to_dict() if self.selected_warning else None,
             "context_insights": self.context_insights,
             "candidate_patches": [p.to_dict() for p in self.candidate_patches],
             "final_patch": self.final_patch.to_dict() if self.final_patch else None,
@@ -473,6 +509,13 @@ class SharedState:
         # Convert stage string to enum
         stage = WorkflowStage(data.get("current_stage", "INITIALIZED"))
 
+        # Convert warnings
+        warnings = [WarningItem.from_dict(w) for w in data.get("discovered_warnings", [])]
+
+        # Convert selected warning
+        selected_warning_data = data.get("selected_warning")
+        selected_warning = WarningItem.from_dict(selected_warning_data) if selected_warning_data else None
+
         # Convert patches
         patches = [CandidatePatch.from_dict(p) for p in data.get("candidate_patches", [])]
 
@@ -484,6 +527,8 @@ class SharedState:
             task_id=data["task_id"],
             current_stage=stage,
             initial_requirement=data.get("initial_requirement", ""),
+            discovered_warnings=warnings,
+            selected_warning=selected_warning,
             context_insights=data.get("context_insights", {}),
             candidate_patches=patches,
             final_patch=final_patch,
